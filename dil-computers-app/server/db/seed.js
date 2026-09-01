@@ -32,14 +32,28 @@ async function ensureSchema(client) {
           `Current columns: [${[...cols].join(', ')}]. Missing: [${missing.join(', ')}].`
       )
 
+      if (count > 0) {
+        // Dump the actual content so whoever reads the deploy log can see
+        // exactly what's there before anything gets touched.
+        const { rows: sample } = await client.query('SELECT * FROM products LIMIT 20')
+        console.warn(`Sample of existing "products" rows (${count} total):`)
+        console.warn(JSON.stringify(sample, null, 2))
+      }
+
       if (count === 0) {
         console.warn('Table is empty — dropping and recreating with the expected schema.')
+        await client.query('DROP TABLE products')
+      } else if (process.env.FORCE_RESET_PRODUCTS === 'true') {
+        console.warn(
+          'FORCE_RESET_PRODUCTS=true — dropping the existing table (see sample above) and recreating.'
+        )
         await client.query('DROP TABLE products')
       } else {
         throw new Error(
           `"products" table already exists with ${count} row(s) but an incompatible schema ` +
             `(missing columns: ${missing.join(', ')}). Refusing to modify it automatically — ` +
-            `please review it manually before re-running the seed.`
+            `review the sample rows logged above, then set FORCE_RESET_PRODUCTS=true and redeploy ` +
+            `if it's safe to discard, or migrate it by hand otherwise.`
         )
       }
     }
