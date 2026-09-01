@@ -1,2 +1,0 @@
-# dilcomps
-Software for Dilcomp
