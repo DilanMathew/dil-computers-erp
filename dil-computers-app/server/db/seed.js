@@ -11,7 +11,40 @@ const SCHEMA_PATH = path.join(__dirname, 'schema.sql')
 const CSV_PATH = path.join(__dirname, '..', 'data', 'product_catalogue.csv')
 const BATCH_SIZE = 500
 
+const REQUIRED_COLUMNS = ['category', 'name', 'price', 'quantity']
+
 async function ensureSchema(client) {
+  // A "products" table may already exist in this database from something
+  // other than this app. Check its shape before assuming our schema applies.
+  const { rows: existingColumns } = await client.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'products'`
+  )
+
+  if (existingColumns.length > 0) {
+    const cols = new Set(existingColumns.map((r) => r.column_name))
+    const missing = REQUIRED_COLUMNS.filter((c) => !cols.has(c))
+
+    if (missing.length > 0) {
+      const { rows: countRows } = await client.query('SELECT COUNT(*)::int AS count FROM products')
+      const count = countRows[0].count
+      console.warn(
+        `Existing "products" table has an incompatible schema. ` +
+          `Current columns: [${[...cols].join(', ')}]. Missing: [${missing.join(', ')}].`
+      )
+
+      if (count === 0) {
+        console.warn('Table is empty — dropping and recreating with the expected schema.')
+        await client.query('DROP TABLE products')
+      } else {
+        throw new Error(
+          `"products" table already exists with ${count} row(s) but an incompatible schema ` +
+            `(missing columns: ${missing.join(', ')}). Refusing to modify it automatically — ` +
+            `please review it manually before re-running the seed.`
+        )
+      }
+    }
+  }
+
   const sql = fs.readFileSync(SCHEMA_PATH, 'utf8')
   await client.query(sql)
 }
