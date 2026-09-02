@@ -15,6 +15,55 @@ const SORTABLE_COLUMNS = new Set(['name', 'category', 'price', 'quantity'])
 
 app.use(express.json())
 
+// Shared validation for the line items on a quotation or invoice. Returns
+// { ok: true, items: <normalized items> } or { ok: false, message }.
+function validateLineItems(rawItems) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    return { ok: false, message: 'At least one line item is required' }
+  }
+
+  const items = []
+  for (const raw of rawItems) {
+    const category = typeof raw?.category === 'string' ? raw.category.trim() : ''
+    const name = typeof raw?.name === 'string' ? raw.name.trim() : ''
+    const quantity = Number(raw?.quantity)
+    const catalPrice = Number(raw?.catalPrice)
+    const finalPrice = Number(raw?.finalPrice)
+
+    if (!category || !name) {
+      return { ok: false, message: 'Each line item needs a category and product name' }
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return { ok: false, message: `Invalid quantity for "${name}"` }
+    }
+    if (!Number.isFinite(catalPrice) || catalPrice < 0) {
+      return { ok: false, message: `Invalid catalogue price for "${name}"` }
+    }
+    if (!Number.isFinite(finalPrice) || finalPrice < 0) {
+      return { ok: false, message: `Invalid final price for "${name}"` }
+    }
+
+    items.push({
+      category,
+      name,
+      quantity,
+      catalPrice,
+      finalPrice,
+      sameAsCatalogue: Boolean(raw?.sameAsCatalogue),
+    })
+  }
+
+  return { ok: true, items }
+}
+
+function computeGrandTotal(items) {
+  return items.reduce((sum, item) => sum + item.finalPrice * item.quantity, 0)
+}
+
+function isValidDateString(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value))
+}
+
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {}
 
@@ -93,6 +142,163 @@ app.get('/api/products', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('GET /api/products failed:', err)
     res.status(500).json({ message: 'Could not load products' })
+  }
+})
+
+app.post('/api/quotations', requireAuth, async (req, res) => {
+  try {
+    const { quotationNumber, quotationDate, customerName, items: rawItems } = req.body || {}
+
+    const number = typeof quotationNumber === 'string' ? quotationNumber.trim() : ''
+    if (!number) {
+      return res.status(400).json({ message: 'Quotation number is required' })
+    }
+    if (!isValidDateString(quotationDate)) {
+      return res.status(400).json({ message: 'A valid quotation date (YYYY-MM-DD) is required' })
+    }
+
+    const validation = validateLineItems(rawItems)
+    if (!validation.ok) {
+      return res.status(400).json({ message: validation.message })
+    }
+
+    const grandTotal = computeGrandTotal(validation.items)
+    const customer = typeof customerName === 'string' && customerName.trim() ? customerName.trim() : null
+
+    const { rows } = await pool.query(
+      `INSERT INTO quotations (quotation_number, quotation_date, customer_name, items, grand_total)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, quotation_number, quotation_date, customer_name, items, grand_total, created_at`,
+      [number, quotationDate, customer, JSON.stringify(validation.items), grandTotal]
+    )
+
+    res.status(201).json({ quotation: rows[0] })
+  } catch (err) {
+    console.error('POST /api/quotations failed:', err)
+    res.status(500).json({ message: 'Could not save quotation' })
+  }
+})
+
+app.get('/api/quotations', requireAuth, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 10, 1), 50)
+    const params = []
+    let where = ''
+
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`)
+      where = `WHERE quotation_number ILIKE $${params.length} OR customer_name ILIKE $${params.length}`
+    }
+
+    params.push(limit)
+    const { rows } = await pool.query(
+      `SELECT id, quotation_number, quotation_date, customer_name, grand_total, created_at
+       FROM quotations
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT $${params.length}`,
+      params
+    )
+
+    res.json({ quotations: rows })
+  } catch (err) {
+    console.error('GET /api/quotations failed:', err)
+    res.status(500).json({ message: 'Could not load quotations' })
+  }
+})
+
+app.post('/api/invoices', requireAuth, async (req, res) => {
+  try {
+    const {
+      invoiceNumber,
+      invoiceDate,
+      customerName,
+      customerPhone,
+      customerAddress,
+      paymentMethod,
+      quotationNumber,
+      items: rawItems,
+    } = req.body || {}
+
+    const number = typeof invoiceNumber === 'string' ? invoiceNumber.trim() : ''
+    if (!number) {
+      return res.status(400).json({ message: 'Invoice number is required' })
+    }
+    if (!isValidDateString(invoiceDate)) {
+      return res.status(400).json({ message: 'A valid invoice date (YYYY-MM-DD) is required' })
+    }
+    const customer = typeof customerName === 'string' ? customerName.trim() : ''
+    if (!customer) {
+      return res.status(400).json({ message: 'Customer name is required' })
+    }
+
+    const validation = validateLineItems(rawItems)
+    if (!validation.ok) {
+      return res.status(400).json({ message: validation.message })
+    }
+
+    const grandTotal = computeGrandTotal(validation.items)
+    const phone = typeof customerPhone === 'string' && customerPhone.trim() ? customerPhone.trim() : null
+    const address = typeof customerAddress === 'string' && customerAddress.trim() ? customerAddress.trim() : null
+    const payment = typeof paymentMethod === 'string' && paymentMethod.trim() ? paymentMethod.trim() : null
+    const refQuotation =
+      typeof quotationNumber === 'string' && quotationNumber.trim() ? quotationNumber.trim() : null
+
+    const { rows } = await pool.query(
+      `INSERT INTO invoices
+         (invoice_number, invoice_date, customer_name, customer_phone, customer_address,
+          payment_method, quotation_number, items, grand_total)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, invoice_number, invoice_date, customer_name, customer_phone, customer_address,
+                 payment_method, quotation_number, items, grand_total, created_at`,
+      [number, invoiceDate, customer, phone, address, payment, refQuotation, JSON.stringify(validation.items), grandTotal]
+    )
+
+    res.status(201).json({ invoice: rows[0] })
+  } catch (err) {
+    console.error('POST /api/invoices failed:', err)
+    res.status(500).json({ message: 'Could not save invoice' })
+  }
+})
+
+app.get('/api/invoices', requireAuth, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
+    const offset = (page - 1) * pageSize
+
+    const params = []
+    let where = ''
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`)
+      where = `WHERE invoice_number ILIKE $${params.length} OR customer_name ILIKE $${params.length}`
+    }
+
+    const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM invoices ${where}`, params)
+    const total = countResult.rows[0].total
+
+    params.push(pageSize)
+    params.push(offset)
+    const itemsResult = await pool.query(
+      `SELECT id, invoice_number, invoice_date, customer_name, customer_phone, customer_address,
+              payment_method, quotation_number, items, grand_total, created_at
+       FROM invoices
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    res.json({
+      items: itemsResult.rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
+  } catch (err) {
+    console.error('GET /api/invoices failed:', err)
+    res.status(500).json({ message: 'Could not load invoices' })
   }
 })
 
