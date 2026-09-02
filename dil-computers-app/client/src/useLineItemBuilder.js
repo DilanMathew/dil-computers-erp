@@ -1,0 +1,166 @@
+import { useEffect, useState } from 'react'
+import { apiFetch, AuthError } from './api'
+
+// Shared state + logic behind the "pick a category, search a product,
+// set a quantity and a final price" form used by both quotation and
+// invoice creation. Returns everything a <ProductPicker> needs to render,
+// plus buildItem() to turn the current draft into a validated line item.
+export default function useLineItemBuilder({ token, onLogout }) {
+  const [categories, setCategories] = useState([])
+
+  const [category, setCategory] = useState('')
+  const [productQuery, setProductQuery] = useState('')
+  const [selectedProduct, setSelectedProduct] = useState(null)
+  const [suggestions, setSuggestions] = useState([])
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [suggestLoading, setSuggestLoading] = useState(false)
+
+  const [quantity, setQuantity] = useState('1')
+  const [finalPrice, setFinalPrice] = useState('')
+  const [sameAsCatalogue, setSameAsCatalogue] = useState(false)
+
+  useEffect(() => {
+    apiFetch('/api/categories', token)
+      .then((data) => setCategories(data.categories || []))
+      .catch((err) => {
+        if (err instanceof AuthError) onLogout()
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Look up products in the selected category as the user types a name.
+  useEffect(() => {
+    if (!category) {
+      setSuggestions([])
+      return
+    }
+
+    let cancelled = false
+    const id = setTimeout(() => {
+      setSuggestLoading(true)
+      const params = new URLSearchParams({ category, pageSize: '10', sort: 'name' })
+      if (productQuery) params.set('q', productQuery)
+
+      apiFetch(`/api/products?${params.toString()}`, token)
+        .then((data) => {
+          if (cancelled) return
+          setSuggestions(data.items || [])
+        })
+        .catch((err) => {
+          if (cancelled) return
+          if (err instanceof AuthError) onLogout()
+        })
+        .finally(() => {
+          if (!cancelled) setSuggestLoading(false)
+        })
+    }, 250)
+
+    return () => {
+      cancelled = true
+      clearTimeout(id)
+    }
+  }, [token, category, productQuery, onLogout])
+
+  function resetDraft() {
+    setProductQuery('')
+    setSelectedProduct(null)
+    setSuggestions([])
+    setShowSuggestions(false)
+    setQuantity('1')
+    setFinalPrice('')
+    setSameAsCatalogue(false)
+  }
+
+  function handleCategoryChange(value) {
+    setCategory(value)
+    setProductQuery('')
+    setSelectedProduct(null)
+    setShowSuggestions(false)
+    setFinalPrice('')
+    setSameAsCatalogue(false)
+  }
+
+  function handleSelectSuggestion(product) {
+    setSelectedProduct(product)
+    setProductQuery(product.name)
+    setShowSuggestions(false)
+    setFinalPrice('')
+    setSameAsCatalogue(false)
+  }
+
+  function handleSameAsCatalogueChange(checked) {
+    setSameAsCatalogue(checked)
+    if (checked && selectedProduct) {
+      setFinalPrice(String(selectedProduct.price))
+    } else {
+      setFinalPrice('')
+    }
+  }
+
+  function handleProductQueryChange(value) {
+    setProductQuery(value)
+    setSelectedProduct(null)
+    setShowSuggestions(true)
+  }
+
+  // Validates the current draft and returns { ok: true, item } or
+  // { ok: false, message }. Does not reset the draft — call resetDraft()
+  // yourself once the item has been added.
+  function buildItem() {
+    if (!category) {
+      return { ok: false, message: 'Select a product category.' }
+    }
+    if (!selectedProduct) {
+      return { ok: false, message: 'Pick a product from the suggestions list.' }
+    }
+    const qty = parseInt(quantity, 10)
+    if (!Number.isFinite(qty) || qty <= 0) {
+      return { ok: false, message: 'Enter a quantity greater than zero.' }
+    }
+
+    let resolvedFinalPrice
+    if (sameAsCatalogue) {
+      resolvedFinalPrice = Number(selectedProduct.price)
+    } else {
+      resolvedFinalPrice = Number(finalPrice)
+      if (finalPrice === '' || !Number.isFinite(resolvedFinalPrice) || resolvedFinalPrice < 0) {
+        return { ok: false, message: 'Enter a final price, or tick "Same as catalogue price".' }
+      }
+    }
+
+    return {
+      ok: true,
+      item: {
+        id: `${selectedProduct.id}-${Date.now()}`,
+        category,
+        name: selectedProduct.name,
+        quantity: qty,
+        catalPrice: Number(selectedProduct.price),
+        finalPrice: resolvedFinalPrice,
+        sameAsCatalogue,
+      },
+    }
+  }
+
+  return {
+    categories,
+    category,
+    productQuery,
+    selectedProduct,
+    suggestions,
+    showSuggestions,
+    suggestLoading,
+    quantity,
+    finalPrice,
+    sameAsCatalogue,
+    setQuantity,
+    setFinalPrice,
+    setShowSuggestions,
+    handleCategoryChange,
+    handleSelectSuggestion,
+    handleSameAsCatalogueChange,
+    handleProductQueryChange,
+    resetDraft,
+    buildItem,
+  }
+}

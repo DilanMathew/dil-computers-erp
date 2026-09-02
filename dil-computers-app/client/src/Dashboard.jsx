@@ -1,9 +1,13 @@
 import { useState } from 'react'
 import Catalogue from './Catalogue'
 import CreateQuotation from './CreateQuotation'
+import CreateInvoice from './CreateInvoice'
+import Invoices from './Invoices'
 
 const TABS = [
   { id: 'quotation', label: 'Create Quotation' },
+  { id: 'invoice', label: 'Create Invoice' },
+  { id: 'invoices', label: 'Invoices' },
   { id: 'catalogue', label: 'Product Catalogue' },
 ]
 
@@ -38,11 +42,10 @@ export default function Dashboard({ token, onLogout }) {
         </header>
 
         <main>
-          {tab === 'quotation' ? (
-            <CreateQuotation token={token} onLogout={onLogout} />
-          ) : (
-            <Catalogue token={token} onLogout={onLogout} />
-          )}
+          {tab === 'quotation' && <CreateQuotation token={token} onLogout={onLogout} />}
+          {tab === 'invoice' && <CreateInvoice token={token} onLogout={onLogout} />}
+          {tab === 'invoices' && <Invoices token={token} onLogout={onLogout} />}
+          {tab === 'catalogue' && <Catalogue token={token} onLogout={onLogout} />}
         </main>
       </div>
     </div>
