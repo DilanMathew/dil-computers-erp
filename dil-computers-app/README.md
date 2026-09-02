@@ -16,15 +16,24 @@ logged in — a dashboard with sections scoped to your role:
 - **Quotations** *(all roles)* — searchable, paginated list of every saved
   quotation, with an expandable row showing its line items and who created it.
 - **Create Invoice** *(admin, sales)* — the same category/product/quantity/
-  price picker, plus customer name (required), phone, address, payment
-  method, and an optional reference to an existing quotation number
-  (autocomplete). **Create Invoice (PDF)** saves the invoice, **reduces
-  catalogue stock** by the quantity of each product sold, and downloads a
-  PDF invoice. Stock is checked and decremented atomically — an invoice is
+  price picker, plus a customer (searched from saved customers or typed
+  fresh as a walk-in), phone, address, payment method, and an optional
+  reference to an existing quotation number (autocomplete). Untick "Paid
+  in full now" to record a partial payment or a credit sale (0 received)
+  instead. **Create Invoice (PDF)** saves the invoice, **reduces catalogue
+  stock** by the quantity of each product sold, and downloads a PDF
+  invoice. Stock is checked and decremented atomically — an invoice is
   refused (no partial deduction) if any line item would oversell what's left.
-- **Invoices** *(all roles)* — searchable, paginated list of every saved
-  invoice, with an expandable row showing customer details, line items,
-  and who created it.
+- **Invoices** *(all roles view; admin/sales can record payments)* —
+  searchable, paginated list of every saved invoice, filterable by payment
+  status (paid/partially paid/unpaid). An expandable row shows customer
+  details, line items, payment history, and — while a balance remains — a
+  form to record another payment against it (amount pre-filled to the
+  exact balance due; the server refuses an amount that would overpay).
+- **Customers** *(all roles view; admin/sales can add/edit)* — searchable,
+  paginated list of saved customer records (name, phone, email, address,
+  notes). An expandable row shows and edits those details plus every
+  quotation and invoice linked to that customer.
 - **Product Catalogue** *(all roles)* — the original searchable, paginated
   view of the full product catalogue; quantities reflect stock reduced by
   invoices.
@@ -32,8 +41,8 @@ logged in — a dashboard with sections scoped to your role:
   `sales` / `accountant`), deactivate/reactivate accounts, reset passwords.
   An admin can't deactivate or demote their own account (so there's always
   at least one working admin).
-- **Audit Log** *(admin only)* — who created which quotation/invoice/user
-  and when, most recent first.
+- **Audit Log** *(admin only)* — who created which quotation/invoice/
+  customer/user/payment and when, most recent first.
 
 ### Roles
 
@@ -144,16 +153,30 @@ price, and whether the final price matched the catalogue). `invoices` also
 carries customer phone/address, payment method, and an optional
 `quotation_number` reference (free text, not a foreign key — a quotation
 can be edited or reused without breaking old invoices that cite it). Both
-carry `created_by_user_id`/`created_by_username`, set from the logged-in
-user at creation time.
+carry `created_by_user_id`/`created_by_username` and an optional
+`customer_id` — linking a saved customer is optional either way, so a
+walk-in sale with no saved record works exactly as before.
 
 **`users`** — accounts, bcrypt-hashed passwords, and a `role` (`admin` /
 `sales` / `accountant`). A bootstrap admin is inserted automatically the
 first time the app runs against an empty `users` table (see "First login"
 above); every account after that is created through the Users section.
 
+**`customers`** — saved customer records (name, phone, email, address,
+notes), written by `POST /api/customers`. `name` is the only required
+field.
+
+**`payments`** — one row per payment against an invoice, written
+automatically when an invoice is created (for whatever was received at
+sale time — the full total in the common case) and by
+`POST /api/invoices/:id/payments` for anything recorded later. An
+invoice's status (`paid` / `partial` / `unpaid`) is always computed from
+`SUM(payments.amount)` vs `invoices.grand_total` — never stored — so it
+can't drift out of sync with the payments actually on record.
+
 **`audit_log`** — one row per tracked action (`user.create`, `user.update`,
-`quotation.create`, `invoice.create`), who did it, and a small JSON detail
-snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so deleting an
-account, if that's ever added, wouldn't take its history with it —
-`username` is kept alongside as a permanent snapshot either way.
+`quotation.create`, `invoice.create`, `customer.create`, `customer.update`,
+`payment.record`), who did it, and a small JSON detail snapshot. `user_id`
+is nullable (`ON DELETE SET NULL`) so deleting an account, if that's ever
+added, wouldn't take its history with it — `username` is kept alongside as
+a permanent snapshot either way.
