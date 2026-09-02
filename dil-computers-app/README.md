@@ -1,36 +1,62 @@
 # DIL Computers App
 
 React (Vite) frontend + Node/Express backend, backed by Postgres. Ships a
-login screen with a hardcoded account, and — once logged in — a dashboard
-with five sections:
+login screen backed by real (multi-user, role-based) accounts, and — once
+logged in — a dashboard with sections scoped to your role:
 
-- **Create Quotation** — pick a product category, search for a product by
-  name, and set a quantity; the catalogue price auto-populates. Final price
-  starts empty — tick "Same as catalogue price" to use the catalogue price
-  as-is, or leave it unticked and type a discounted price. Add as many
-  products as needed, then **Create Quotation (PDF)** saves the quotation
-  and downloads a filled-in PDF (quotation #, date, customer, line items,
-  and grand total) straight to your computer. Quotations do **not** affect
-  catalogue stock — they're estimates, not sales.
-- **Quotations** — searchable, paginated list of every saved quotation,
-  with an expandable row showing its line items.
-- **Create Invoice** — the same category/product/quantity/price picker,
-  plus customer name (required), phone, address, payment method, and an
-  optional reference to an existing quotation number (autocomplete).
-  **Create Invoice (PDF)** saves the invoice, **reduces catalogue stock**
-  by the quantity of each product sold, and downloads a PDF invoice. Stock
-  is checked and decremented atomically — an invoice is refused (no
-  partial deduction) if any line item would oversell what's left.
-- **Invoices** — searchable, paginated list of every saved invoice, with
-  an expandable row showing customer details and line items.
-- **Product Catalogue** — the original searchable, paginated view of the
-  full product catalogue; quantities reflect stock reduced by invoices.
+- **Create Quotation** *(admin, sales)* — pick a product category, search
+  for a product by name, and set a quantity; the catalogue price
+  auto-populates. Final price starts empty — tick "Same as catalogue price"
+  to use the catalogue price as-is, or leave it unticked and type a
+  discounted price. Add as many products as needed, then **Create
+  Quotation (PDF)** saves the quotation and downloads a filled-in PDF
+  (quotation #, date, customer, line items, and grand total) straight to
+  your computer. Quotations do **not** affect catalogue stock — they're
+  estimates, not sales.
+- **Quotations** *(all roles)* — searchable, paginated list of every saved
+  quotation, with an expandable row showing its line items and who created it.
+- **Create Invoice** *(admin, sales)* — the same category/product/quantity/
+  price picker, plus customer name (required), phone, address, payment
+  method, and an optional reference to an existing quotation number
+  (autocomplete). **Create Invoice (PDF)** saves the invoice, **reduces
+  catalogue stock** by the quantity of each product sold, and downloads a
+  PDF invoice. Stock is checked and decremented atomically — an invoice is
+  refused (no partial deduction) if any line item would oversell what's left.
+- **Invoices** *(all roles)* — searchable, paginated list of every saved
+  invoice, with an expandable row showing customer details, line items,
+  and who created it.
+- **Product Catalogue** *(all roles)* — the original searchable, paginated
+  view of the full product catalogue; quantities reflect stock reduced by
+  invoices.
+- **Users** *(admin only)* — create accounts, assign roles (`admin` /
+  `sales` / `accountant`), deactivate/reactivate accounts, reset passwords.
+  An admin can't deactivate or demote their own account (so there's always
+  at least one working admin).
+- **Audit Log** *(admin only)* — who created which quotation/invoice/user
+  and when, most recent first.
+
+### Roles
+
+| Role | Can do |
+|---|---|
+| `admin` | Everything, including Users and the Audit Log |
+| `sales` | Browse the catalogue, create and view quotations/invoices |
+| `accountant` | View quotations/invoices/catalogue (read-only) |
+
+Every restriction is enforced server-side (not just hidden in the UI) —
+each API route checks the role on the request's token.
+
+### First login
+
+A bootstrap `admin` account is created automatically the first time the
+app starts against an empty database:
 
 - Username: `admin`
 - Password: `admin123`
 
-(Override via the `ADMIN_USERNAME` / `ADMIN_PASSWORD` env vars without
-touching code.)
+(Override via the `ADMIN_USERNAME` / `ADMIN_PASSWORD` env vars, read only
+during that first bootstrap.) From then on, manage accounts from the
+**Users** section — there's no code-level password to change later.
 
 ## Environment variables
 
@@ -117,4 +143,17 @@ JSONB array (category, product name, quantity, catalogue price, final
 price, and whether the final price matched the catalogue). `invoices` also
 carries customer phone/address, payment method, and an optional
 `quotation_number` reference (free text, not a foreign key — a quotation
-can be edited or reused without breaking old invoices that cite it).
+can be edited or reused without breaking old invoices that cite it). Both
+carry `created_by_user_id`/`created_by_username`, set from the logged-in
+user at creation time.
+
+**`users`** — accounts, bcrypt-hashed passwords, and a `role` (`admin` /
+`sales` / `accountant`). A bootstrap admin is inserted automatically the
+first time the app runs against an empty `users` table (see "First login"
+above); every account after that is created through the Users section.
+
+**`audit_log`** — one row per tracked action (`user.create`, `user.update`,
+`quotation.create`, `invoice.create`), who did it, and a small JSON detail
+snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so deleting an
+account, if that's ever added, wouldn't take its history with it —
+`username` is kept alongside as a permanent snapshot either way.

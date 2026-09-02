@@ -6,10 +6,16 @@ const fs = require('fs')
 const path = require('path')
 const { parse } = require('csv-parse/sync')
 const pool = require('./pool')
+const { hashPassword } = require('../auth')
 
 const SCHEMA_PATH = path.join(__dirname, 'schema.sql')
 const CSV_PATH = path.join(__dirname, '..', 'data', 'product_catalogue.csv')
 const BATCH_SIZE = 500
+
+// Same defaults index.js falls back to when these env vars aren't set —
+// kept in sync so "day one" login still works without extra setup.
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin'
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123'
 
 const REQUIRED_COLUMNS = ['category', 'name', 'price', 'quantity']
 
@@ -68,6 +74,24 @@ async function countProducts(client) {
   return rows[0].count
 }
 
+// Bootstrap a first admin account so there's always a way in. No-ops once
+// any user exists — from then on, user management happens through the app.
+async function ensureBootstrapAdmin(client) {
+  const { rows } = await client.query('SELECT COUNT(*)::int AS count FROM users')
+  if (rows[0].count > 0) {
+    console.log(`users table already has ${rows[0].count} account(s) — skipping bootstrap admin.`)
+    return
+  }
+
+  const passwordHash = await hashPassword(ADMIN_PASSWORD)
+  await client.query(
+    `INSERT INTO users (username, password_hash, full_name, role)
+     VALUES ($1, $2, $3, 'admin')`,
+    [ADMIN_USERNAME, passwordHash, 'Administrator']
+  )
+  console.log(`Created bootstrap admin account "${ADMIN_USERNAME}".`)
+}
+
 function loadCsvRows() {
   const raw = fs.readFileSync(CSV_PATH, 'utf8')
   const records = parse(raw, { columns: true, skip_empty_lines: true, trim: true })
@@ -104,6 +128,8 @@ async function main() {
   try {
     console.log('Ensuring products schema exists...')
     await ensureSchema(client)
+
+    await ensureBootstrapAdmin(client)
 
     const existing = await countProducts(client)
     if (existing > 0) {
