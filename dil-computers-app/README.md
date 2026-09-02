@@ -2,17 +2,29 @@
 
 React (Vite) frontend + Node/Express backend, backed by Postgres. Ships a
 login screen with a hardcoded account, and — once logged in — a dashboard
-with two sections:
+with five sections:
 
 - **Create Quotation** — pick a product category, search for a product by
   name, and set a quantity; the catalogue price auto-populates. Final price
   starts empty — tick "Same as catalogue price" to use the catalogue price
   as-is, or leave it unticked and type a discounted price. Add as many
-  products as needed, then **Create Quotation (PDF)** generates and
-  downloads a filled-in quotation PDF (quotation #, date, customer, line
-  items, and grand total) straight to your computer — no server round trip.
+  products as needed, then **Create Quotation (PDF)** saves the quotation
+  and downloads a filled-in PDF (quotation #, date, customer, line items,
+  and grand total) straight to your computer. Quotations do **not** affect
+  catalogue stock — they're estimates, not sales.
+- **Quotations** — searchable, paginated list of every saved quotation,
+  with an expandable row showing its line items.
+- **Create Invoice** — the same category/product/quantity/price picker,
+  plus customer name (required), phone, address, payment method, and an
+  optional reference to an existing quotation number (autocomplete).
+  **Create Invoice (PDF)** saves the invoice, **reduces catalogue stock**
+  by the quantity of each product sold, and downloads a PDF invoice. Stock
+  is checked and decremented atomically — an invoice is refused (no
+  partial deduction) if any line item would oversell what's left.
+- **Invoices** — searchable, paginated list of every saved invoice, with
+  an expandable row showing customer details and line items.
 - **Product Catalogue** — the original searchable, paginated view of the
-  full product catalogue.
+  full product catalogue; quantities reflect stock reduced by invoices.
 
 - Username: `admin`
 - Password: `admin123`
@@ -82,7 +94,13 @@ npm run build` then `npm run start`).
 
 ## What's in the database
 
-A single `products` table (see `server/db/schema.sql`):
+See `server/db/schema.sql` — all three tables are created idempotently by
+the seed step on every deploy.
+
+**`products`** — seeded from `server/data/product_catalogue.csv` (columns:
+`category`, `Product`, `price`, `quantity`) — 9,500 rows across 19
+categories. `quantity` is live stock: it only decreases, when an invoice is
+created.
 
 | column | type |
 |---|---|
@@ -93,5 +111,10 @@ A single `products` table (see `server/db/schema.sql`):
 | quantity | integer |
 | created_at | timestamptz |
 
-Seeded from `server/data/product_catalogue.csv` (columns: `category`,
-`Product`, `price`, `quantity`) — 9,500 rows across 19 categories.
+**`quotations`** and **`invoices`** — written by `POST /api/quotations`
+and `POST /api/invoices` respectively. Each stores its line items as a
+JSONB array (category, product name, quantity, catalogue price, final
+price, and whether the final price matched the catalogue). `invoices` also
+carries customer phone/address, payment method, and an optional
+`quotation_number` reference (free text, not a foreign key — a quotation
+can be edited or reused without breaking old invoices that cite it).

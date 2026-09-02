@@ -22,6 +22,7 @@ export default function CreateInvoice({ token, onLogout }) {
 
   const [lineItems, setLineItems] = useState([])
   const [formError, setFormError] = useState('')
+  const [successMessage, setSuccessMessage] = useState('')
   const [saving, setSaving] = useState(false)
 
   const builder = useLineItemBuilder({ token, onLogout })
@@ -39,7 +40,7 @@ export default function CreateInvoice({ token, onLogout }) {
       apiFetch(`/api/quotations?q=${encodeURIComponent(quotationQuery)}&pageSize=6`, token)
         .then((data) => {
           if (cancelled) return
-          setQuotationSuggestions(data.quotations || [])
+          setQuotationSuggestions(data.items || [])
         })
         .catch((err) => {
           if (cancelled) return
@@ -70,6 +71,7 @@ export default function CreateInvoice({ token, onLogout }) {
 
   async function handleCreateInvoice() {
     setFormError('')
+    setSuccessMessage('')
     if (!customerName.trim()) {
       setFormError('Customer name is required.')
       return
@@ -114,6 +116,20 @@ export default function CreateInvoice({ token, onLogout }) {
         ],
         items: lineItems,
       })
+
+      setSuccessMessage(`Invoice ${invoiceNumber.trim()} saved and stock updated.`)
+
+      // Reset for the next invoice — otherwise the next save would
+      // re-submit these same line items under a stale, already-used number,
+      // and double-deduct stock for products already sold above.
+      setLineItems([])
+      setCustomerName('')
+      setCustomerPhone('')
+      setCustomerAddress('')
+      setPaymentMethod(PAYMENT_METHODS[0])
+      setQuotationQuery('')
+      setInvoiceNumber(generateDocumentNumber('INV'))
+      setInvoiceDate(todayIso())
     } catch (err) {
       if (err instanceof AuthError) {
         onLogout()
@@ -250,6 +266,8 @@ export default function CreateInvoice({ token, onLogout }) {
 
       <LineItemsTable items={lineItems} onRemove={handleRemoveItem} />
 
+      {successMessage && <div style={styles.success}>{successMessage}</div>}
+
       <div style={styles.footer}>
         <span style={styles.grandTotal}>Grand total: {formatPrice(grandTotal)}</span>
         <button
@@ -348,6 +366,14 @@ const styles = {
     borderRadius: 8,
     background: '#fef2f2',
     color: '#b91c1c',
+    fontSize: 13,
+  },
+  success: {
+    marginTop: 16,
+    padding: '10px 12px',
+    borderRadius: 8,
+    background: '#f0fdf4',
+    color: '#166534',
     fontSize: 13,
   },
   addButton: {
