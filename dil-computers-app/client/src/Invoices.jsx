@@ -91,17 +91,18 @@ export default function Invoices({ token, onLogout }) {
               <th style={styles.th}>Customer</th>
               <th style={styles.th}>Payment</th>
               <th style={styles.th}>Quotation Ref</th>
+              <th style={styles.th}>Created by</th>
               <th style={{ ...styles.th, textAlign: 'right' }}>Total</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td style={styles.td} colSpan={6}>Loading…</td>
+                <td style={styles.td} colSpan={7}>Loading…</td>
               </tr>
             ) : items.length === 0 ? (
               <tr>
-                <td style={styles.td} colSpan={6}>No invoices match your search.</td>
+                <td style={styles.td} colSpan={7}>No invoices match your search.</td>
               </tr>
             ) : (
               items.map((inv) => (
@@ -116,11 +117,12 @@ export default function Invoices({ token, onLogout }) {
                     <td style={styles.td}>{inv.customer_name}</td>
                     <td style={styles.td}>{inv.payment_method || '—'}</td>
                     <td style={styles.td}>{inv.quotation_number || '—'}</td>
+                    <td style={styles.td}>{inv.created_by_username || '—'}</td>
                     <td style={{ ...styles.td, textAlign: 'right' }}>{formatPrice(inv.grand_total)}</td>
                   </tr>
                   {expandedId === inv.id && (
                     <tr key={`${inv.id}-detail`}>
-                      <td style={styles.detailCell} colSpan={6}>
+                      <td style={styles.detailCell} colSpan={7}>
                         <div style={styles.detailGrid}>
                           {inv.customer_phone && <span>Phone: {inv.customer_phone}</span>}
                           {inv.customer_address && <span>Address: {inv.customer_address}</span>}

@@ -1,19 +1,31 @@
 const path = require('path')
 const express = require('express')
 const pool = require('./db/pool')
-const { issueToken, requireAuth } = require('./auth')
+const { ROLES, issueToken, requireAuth, requireRole, hashPassword, verifyPassword } = require('./auth')
 
 const app = express()
 const PORT = process.env.PORT || 5000
 
-// Credentials for now are hardcoded as requested. Can be overridden with
-// env vars (ADMIN_USERNAME / ADMIN_PASSWORD) without touching code.
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin'
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123'
-
 const SORTABLE_COLUMNS = new Set(['name', 'category', 'price', 'quantity'])
 
 app.use(express.json())
+
+// Records who did what, for the admin-only audit log. Pass a transaction
+// client when logging inside a transaction so the entry commits/rolls back
+// with the rest of the work; otherwise the pool is used directly. Logging
+// failures are swallowed (with a console.error) — an audit-log write should
+// never be the reason a real request fails.
+async function logAudit(queryable, { user, action, entityType = null, entityId = null, details = null }) {
+  try {
+    await queryable.query(
+      `INSERT INTO audit_log (user_id, username, action, entity_type, entity_id, details)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [user.id, user.username, action, entityType, entityId ? String(entityId) : null, details ? JSON.stringify(details) : null]
+    )
+  } catch (err) {
+    console.error('Audit log write failed:', err)
+  }
+}
 
 // Shared validation for the line items on a quotation or invoice. Returns
 // { ok: true, items: <normalized items> } or { ok: false, message }.
@@ -71,19 +83,208 @@ function isValidDateString(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value))
 }
 
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body || {}
+app.post('/api/login', async (req, res) => {
+  try {
+    const { username, password } = req.body || {}
+    if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
+      return res.status(401).json({ message: 'Invalid username or password' })
+    }
 
-  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-    const token = issueToken(username)
-    return res.json({ token })
+    const { rows } = await pool.query(
+      'SELECT id, username, password_hash, full_name, role, active FROM users WHERE username = $1',
+      [username]
+    )
+    const account = rows[0]
+
+    // Compare against a dummy hash even when the account doesn't exist, so
+    // the response time doesn't reveal whether a username is registered.
+    const passwordOk = await verifyPassword(
+      password,
+      account ? account.password_hash : '$2a$10$CwTycUXWue0Thq9StjUM0uJ8Q8OqDXQZfPFfLB6QOX0z6mOVtCTP.'
+    )
+
+    if (!account || !account.active || !passwordOk) {
+      return res.status(401).json({ message: 'Invalid username or password' })
+    }
+
+    const user = { id: account.id, username: account.username, role: account.role }
+    const token = issueToken(user)
+    res.json({ token, user: { ...user, fullName: account.full_name } })
+  } catch (err) {
+    console.error('POST /api/login failed:', err)
+    res.status(500).json({ message: 'Could not log in' })
   }
-
-  return res.status(401).json({ message: 'Invalid username or password' })
 })
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' })
+})
+
+app.get('/api/me', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, username, full_name, role, active FROM users WHERE id = $1',
+      [req.user.id]
+    )
+    const account = rows[0]
+    if (!account || !account.active) {
+      return res.status(401).json({ message: 'Account no longer active' })
+    }
+    res.json({ user: { id: account.id, username: account.username, fullName: account.full_name, role: account.role } })
+  } catch (err) {
+    console.error('GET /api/me failed:', err)
+    res.status(500).json({ message: 'Could not load account' })
+  }
+})
+
+// --- User management (admin only) ---
+
+app.get('/api/users', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, username, full_name, role, active, created_at FROM users ORDER BY created_at ASC'
+    )
+    res.json({ users: rows })
+  } catch (err) {
+    console.error('GET /api/users failed:', err)
+    res.status(500).json({ message: 'Could not load users' })
+  }
+})
+
+app.post('/api/users', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { username, password, fullName, role } = req.body || {}
+    const uname = typeof username === 'string' ? username.trim() : ''
+    if (!uname) {
+      return res.status(400).json({ message: 'Username is required' })
+    }
+    if (typeof password !== 'string' || password.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters' })
+    }
+    if (!ROLES.includes(role)) {
+      return res.status(400).json({ message: `Role must be one of: ${ROLES.join(', ')}` })
+    }
+
+    const passwordHash = await hashPassword(password)
+    const { rows } = await pool.query(
+      `INSERT INTO users (username, password_hash, full_name, role)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, username, full_name, role, active, created_at`,
+      [uname, passwordHash, typeof fullName === 'string' && fullName.trim() ? fullName.trim() : null, role]
+    )
+    const created = rows[0]
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'user.create',
+      entityType: 'user',
+      entityId: created.id,
+      details: { username: created.username, role: created.role },
+    })
+
+    res.status(201).json({ user: created })
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ message: 'That username is already taken' })
+    }
+    console.error('POST /api/users failed:', err)
+    res.status(500).json({ message: 'Could not create user' })
+  }
+})
+
+app.patch('/api/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid user id' })
+    }
+    if (id === req.user.id && (req.body?.active === false || (req.body?.role && req.body.role !== 'admin'))) {
+      return res.status(400).json({ message: 'You cannot deactivate or demote your own account' })
+    }
+
+    const sets = []
+    const params = []
+
+    if (typeof req.body?.fullName === 'string') {
+      params.push(req.body.fullName.trim() || null)
+      sets.push(`full_name = $${params.length}`)
+    }
+    if (typeof req.body?.role === 'string') {
+      if (!ROLES.includes(req.body.role)) {
+        return res.status(400).json({ message: `Role must be one of: ${ROLES.join(', ')}` })
+      }
+      params.push(req.body.role)
+      sets.push(`role = $${params.length}`)
+    }
+    if (typeof req.body?.active === 'boolean') {
+      params.push(req.body.active)
+      sets.push(`active = $${params.length}`)
+    }
+    if (typeof req.body?.password === 'string' && req.body.password) {
+      if (req.body.password.length < 6) {
+        return res.status(400).json({ message: 'Password must be at least 6 characters' })
+      }
+      params.push(await hashPassword(req.body.password))
+      sets.push(`password_hash = $${params.length}`)
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ message: 'Nothing to update' })
+    }
+
+    params.push(id)
+    const { rows } = await pool.query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $${params.length}
+       RETURNING id, username, full_name, role, active, created_at`,
+      params
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'user.update',
+      entityType: 'user',
+      entityId: id,
+      details: { fields: Object.keys(req.body || {}) },
+    })
+
+    res.json({ user: rows[0] })
+  } catch (err) {
+    console.error('PATCH /api/users/:id failed:', err)
+    res.status(500).json({ message: 'Could not update user' })
+  }
+})
+
+app.get('/api/audit-log', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 50, 1), 200)
+    const offset = (page - 1) * pageSize
+
+    const countResult = await pool.query('SELECT COUNT(*)::int AS total FROM audit_log')
+    const total = countResult.rows[0].total
+
+    const itemsResult = await pool.query(
+      `SELECT id, user_id, username, action, entity_type, entity_id, details, created_at
+       FROM audit_log
+       ORDER BY created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [pageSize, offset]
+    )
+
+    res.json({
+      items: itemsResult.rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
+  } catch (err) {
+    console.error('GET /api/audit-log failed:', err)
+    res.status(500).json({ message: 'Could not load audit log' })
+  }
 })
 
 app.get('/api/categories', requireAuth, async (req, res) => {
@@ -152,7 +353,7 @@ app.get('/api/products', requireAuth, async (req, res) => {
   }
 })
 
-app.post('/api/quotations', requireAuth, async (req, res) => {
+app.post('/api/quotations', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
   try {
     const { quotationNumber, quotationDate, customerName, items: rawItems } = req.body || {}
 
@@ -173,13 +374,25 @@ app.post('/api/quotations', requireAuth, async (req, res) => {
     const customer = typeof customerName === 'string' && customerName.trim() ? customerName.trim() : null
 
     const { rows } = await pool.query(
-      `INSERT INTO quotations (quotation_number, quotation_date, customer_name, items, grand_total)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, quotation_number, quotation_date, customer_name, items, grand_total, created_at`,
-      [number, quotationDate, customer, JSON.stringify(validation.items), grandTotal]
+      `INSERT INTO quotations
+         (quotation_number, quotation_date, customer_name, items, grand_total,
+          created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, quotation_number, quotation_date, customer_name, items, grand_total,
+                 created_by_username, created_at`,
+      [number, quotationDate, customer, JSON.stringify(validation.items), grandTotal, req.user.id, req.user.username]
     )
+    const quotation = rows[0]
 
-    res.status(201).json({ quotation: rows[0] })
+    await logAudit(pool, {
+      user: req.user,
+      action: 'quotation.create',
+      entityType: 'quotation',
+      entityId: quotation.id,
+      details: { quotationNumber: number, grandTotal },
+    })
+
+    res.status(201).json({ quotation })
   } catch (err) {
     console.error('POST /api/quotations failed:', err)
     res.status(500).json({ message: 'Could not save quotation' })
@@ -208,7 +421,8 @@ app.get('/api/quotations', requireAuth, async (req, res) => {
     params.push(pageSize)
     params.push(offset)
     const itemsResult = await pool.query(
-      `SELECT id, quotation_number, quotation_date, customer_name, items, grand_total, created_at
+      `SELECT id, quotation_number, quotation_date, customer_name, items, grand_total,
+              created_by_username, created_at
        FROM quotations
        ${where}
        ORDER BY created_at DESC
@@ -229,7 +443,7 @@ app.get('/api/quotations', requireAuth, async (req, res) => {
   }
 })
 
-app.post('/api/invoices', requireAuth, async (req, res) => {
+app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
   const client = await pool.connect()
   try {
     const {
@@ -296,15 +510,29 @@ app.post('/api/invoices', requireAuth, async (req, res) => {
     const { rows } = await client.query(
       `INSERT INTO invoices
          (invoice_number, invoice_date, customer_name, customer_phone, customer_address,
-          payment_method, quotation_number, items, grand_total)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          payment_method, quotation_number, items, grand_total,
+          created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id, invoice_number, invoice_date, customer_name, customer_phone, customer_address,
-                 payment_method, quotation_number, items, grand_total, created_at`,
-      [number, invoiceDate, customer, phone, address, payment, refQuotation, JSON.stringify(validation.items), grandTotal]
+                 payment_method, quotation_number, items, grand_total, created_by_username, created_at`,
+      [
+        number, invoiceDate, customer, phone, address, payment, refQuotation,
+        JSON.stringify(validation.items), grandTotal, req.user.id, req.user.username,
+      ]
     )
+    const invoice = rows[0]
 
     await client.query('COMMIT')
-    res.status(201).json({ invoice: rows[0] })
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'invoice.create',
+      entityType: 'invoice',
+      entityId: invoice.id,
+      details: { invoiceNumber: number, grandTotal, productIds: validation.items.map((i) => i.productId) },
+    })
+
+    res.status(201).json({ invoice })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
     console.error('POST /api/invoices failed:', err)
@@ -334,7 +562,7 @@ app.get('/api/invoices', requireAuth, async (req, res) => {
     params.push(offset)
     const itemsResult = await pool.query(
       `SELECT id, invoice_number, invoice_date, customer_name, customer_phone, customer_address,
-              payment_method, quotation_number, items, grand_total, created_at
+              payment_method, quotation_number, items, grand_total, created_by_username, created_at
        FROM invoices
        ${where}
        ORDER BY created_at DESC

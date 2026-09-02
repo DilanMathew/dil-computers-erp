@@ -89,17 +89,18 @@ export default function Quotations({ token, onLogout }) {
               <th style={styles.th}>Quotation #</th>
               <th style={styles.th}>Date</th>
               <th style={styles.th}>Customer</th>
+              <th style={styles.th}>Created by</th>
               <th style={{ ...styles.th, textAlign: 'right' }}>Total</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td style={styles.td} colSpan={4}>Loading…</td>
+                <td style={styles.td} colSpan={5}>Loading…</td>
               </tr>
             ) : items.length === 0 ? (
               <tr>
-                <td style={styles.td} colSpan={4}>No quotations match your search.</td>
+                <td style={styles.td} colSpan={5}>No quotations match your search.</td>
               </tr>
             ) : (
               items.map((q) => (
@@ -111,11 +112,12 @@ export default function Quotations({ token, onLogout }) {
                     <td style={styles.td}>{q.quotation_number}</td>
                     <td style={styles.td}>{formatDate(q.quotation_date)}</td>
                     <td style={styles.td}>{q.customer_name || 'Walk-in'}</td>
+                    <td style={styles.td}>{q.created_by_username || '—'}</td>
                     <td style={{ ...styles.td, textAlign: 'right' }}>{formatPrice(q.grand_total)}</td>
                   </tr>
                   {expandedId === q.id && (
                     <tr>
-                      <td style={styles.detailCell} colSpan={4}>
+                      <td style={styles.detailCell} colSpan={5}>
                         <table style={styles.innerTable}>
                           <thead>
                             <tr>

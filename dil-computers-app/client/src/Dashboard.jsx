@@ -4,17 +4,28 @@ import CreateQuotation from './CreateQuotation'
 import Quotations from './Quotations'
 import CreateInvoice from './CreateInvoice'
 import Invoices from './Invoices'
+import Users from './Users'
+import AuditLog from './AuditLog'
 
+// Which roles see each tab. 'sales' can create and view sales documents;
+// 'accountant' can view them but not create (read-only); 'admin' sees
+// everything plus user management and the audit log.
 const TABS = [
-  { id: 'quotation', label: 'Create Quotation' },
-  { id: 'quotations', label: 'Quotations' },
-  { id: 'invoice', label: 'Create Invoice' },
-  { id: 'invoices', label: 'Invoices' },
-  { id: 'catalogue', label: 'Product Catalogue' },
+  { id: 'quotation', label: 'Create Quotation', roles: ['admin', 'sales'], Component: CreateQuotation },
+  { id: 'quotations', label: 'Quotations', roles: ['admin', 'sales', 'accountant'], Component: Quotations },
+  { id: 'invoice', label: 'Create Invoice', roles: ['admin', 'sales'], Component: CreateInvoice },
+  { id: 'invoices', label: 'Invoices', roles: ['admin', 'sales', 'accountant'], Component: Invoices },
+  { id: 'catalogue', label: 'Product Catalogue', roles: ['admin', 'sales', 'accountant'], Component: Catalogue },
+  { id: 'users', label: 'Users', roles: ['admin'], Component: Users },
+  { id: 'audit', label: 'Audit Log', roles: ['admin'], Component: AuditLog },
 ]
 
-export default function Dashboard({ token, onLogout }) {
-  const [tab, setTab] = useState('quotation')
+export default function Dashboard({ token, user, onLogout }) {
+  const visibleTabs = TABS.filter((t) => t.roles.includes(user.role))
+  const [tab, setTab] = useState(visibleTabs[0]?.id)
+
+  const active = visibleTabs.find((t) => t.id === tab) || visibleTabs[0]
+  const ActiveComponent = active?.Component
 
   return (
     <div style={styles.page}>
@@ -23,13 +34,13 @@ export default function Dashboard({ token, onLogout }) {
           <div>
             <h1 style={styles.title}>DIL Computers</h1>
             <nav style={styles.nav}>
-              {TABS.map((t) => (
+              {visibleTabs.map((t) => (
                 <button
                   key={t.id}
                   type="button"
                   style={{
                     ...styles.tabButton,
-                    ...(tab === t.id ? styles.tabButtonActive : {}),
+                    ...(active?.id === t.id ? styles.tabButtonActive : {}),
                   }}
                   onClick={() => setTab(t.id)}
                 >
@@ -38,17 +49,18 @@ export default function Dashboard({ token, onLogout }) {
               ))}
             </nav>
           </div>
-          <button style={styles.logoutButton} onClick={onLogout}>
-            Log out
-          </button>
+          <div style={styles.headerRight}>
+            <span style={styles.whoami}>
+              {user.fullName || user.username} <span style={styles.roleBadge}>{user.role}</span>
+            </span>
+            <button style={styles.logoutButton} onClick={onLogout}>
+              Log out
+            </button>
+          </div>
         </header>
 
         <main>
-          {tab === 'quotation' && <CreateQuotation token={token} onLogout={onLogout} />}
-          {tab === 'quotations' && <Quotations token={token} onLogout={onLogout} />}
-          {tab === 'invoice' && <CreateInvoice token={token} onLogout={onLogout} />}
-          {tab === 'invoices' && <Invoices token={token} onLogout={onLogout} />}
-          {tab === 'catalogue' && <Catalogue token={token} onLogout={onLogout} />}
+          {ActiveComponent && <ActiveComponent token={token} user={user} onLogout={onLogout} />}
         </main>
       </div>
     </div>
@@ -85,6 +97,7 @@ const styles = {
   nav: {
     display: 'flex',
     gap: 8,
+    flexWrap: 'wrap',
   },
   tabButton: {
     padding: '8px 14px',
@@ -100,6 +113,26 @@ const styles = {
     background: '#1e3a8a',
     borderColor: '#1e3a8a',
     color: '#fff',
+  },
+  headerRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+  },
+  whoami: {
+    fontSize: 13,
+    color: '#334155',
+    fontWeight: 600,
+  },
+  roleBadge: {
+    marginLeft: 6,
+    padding: '2px 8px',
+    borderRadius: 999,
+    background: '#eff6ff',
+    color: '#1e3a8a',
+    fontSize: 11,
+    fontWeight: 700,
+    textTransform: 'uppercase',
   },
   logoutButton: {
     padding: '8px 14px',

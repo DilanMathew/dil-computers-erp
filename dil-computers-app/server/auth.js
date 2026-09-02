@@ -1,11 +1,18 @@
 const crypto = require('crypto')
+const bcrypt = require('bcryptjs')
 
-// Lightweight signed-token auth for the single hardcoded admin account.
-// No session store needed: the token is self-verifying (HMAC signature +
-// expiry), so any server instance can validate it statelessly.
+// Signed-token auth backed by the "users" table. The token is
+// self-verifying (HMAC signature + expiry) so any server instance can
+// validate it statelessly — no session store needed. The subject is the
+// user's {id, username, role}, base64url-encoded before signing so it can
+// safely contain "." (JSON strings sometimes do, e.g. a versioned username)
+// without upsetting the "." split used to unpack the token.
 
 const SECRET = process.env.AUTH_SECRET || 'dev-only-insecure-secret-change-me'
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000 // 8 hours
+const BCRYPT_ROUNDS = 10
+
+const ROLES = ['admin', 'sales', 'accountant']
 
 function sign(subject, expiresAt) {
   const payload = `${subject}.${expiresAt}`
@@ -13,8 +20,10 @@ function sign(subject, expiresAt) {
   return Buffer.from(`${payload}.${sig}`).toString('base64url')
 }
 
-function issueToken(subject) {
+// userPayload: { id, username, role }
+function issueToken(userPayload) {
   const expiresAt = Date.now() + TOKEN_TTL_MS
+  const subject = Buffer.from(JSON.stringify(userPayload)).toString('base64url')
   return sign(subject, expiresAt)
 }
 
@@ -37,7 +46,10 @@ function verifyToken(token) {
 
     if (Date.now() > expiresAt) return null
 
-    return { subject }
+    const userPayload = JSON.parse(Buffer.from(subject, 'base64url').toString('utf8'))
+    if (!userPayload || !userPayload.id || !userPayload.username || !userPayload.role) return null
+
+    return userPayload
   } catch (err) {
     return null
   }
@@ -49,12 +61,39 @@ function requireAuth(req, res, next) {
   if (scheme !== 'Bearer' || !token) {
     return res.status(401).json({ message: 'Missing or invalid Authorization header' })
   }
-  const session = verifyToken(token)
-  if (!session) {
+  const user = verifyToken(token)
+  if (!user) {
     return res.status(401).json({ message: 'Invalid or expired token' })
   }
-  req.user = session
+  req.user = user
   next()
 }
 
-module.exports = { issueToken, verifyToken, requireAuth }
+// requireRole('admin') or requireRole('admin', 'sales') — must follow
+// requireAuth on the same route so req.user is already set.
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      return res.status(403).json({ message: 'You do not have permission to do that' })
+    }
+    next()
+  }
+}
+
+async function hashPassword(password) {
+  return bcrypt.hash(password, BCRYPT_ROUNDS)
+}
+
+async function verifyPassword(password, hash) {
+  return bcrypt.compare(password, hash)
+}
+
+module.exports = {
+  ROLES,
+  issueToken,
+  verifyToken,
+  requireAuth,
+  requireRole,
+  hashPassword,
+  verifyPassword,
+}

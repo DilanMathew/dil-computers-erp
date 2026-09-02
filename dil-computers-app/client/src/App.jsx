@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import Dashboard from './Dashboard'
+import { apiFetch } from './api'
 
 const AUTH_KEY = 'dil_auth_token'
 
@@ -21,7 +22,7 @@ function LoginPage({ onLogin }) {
       })
       const data = await res.json()
       if (res.ok && data.token) {
-        onLogin(data.token)
+        onLogin(data.token, data.user)
       } else {
         setError(data.message || 'Invalid username or password')
       }
@@ -72,28 +73,46 @@ function LoginPage({ onLogin }) {
 
 export default function App() {
   const [token, setToken] = useState(null)
+  const [user, setUser] = useState(null)
   const [checked, setChecked] = useState(false)
 
   useEffect(() => {
     const saved = window.localStorage.getItem(AUTH_KEY)
-    if (saved) setToken(saved)
-    setChecked(true)
+    if (!saved) {
+      setChecked(true)
+      return
+    }
+
+    // Restore the logged-in user from the token rather than trusting
+    // anything cached — this also catches a token that expired or an
+    // account that was deactivated while the tab was closed.
+    apiFetch('/api/me', saved)
+      .then((data) => {
+        setToken(saved)
+        setUser(data.user)
+      })
+      .catch(() => {
+        window.localStorage.removeItem(AUTH_KEY)
+      })
+      .finally(() => setChecked(true))
   }, [])
 
-  function handleLogin(newToken) {
+  function handleLogin(newToken, newUser) {
     window.localStorage.setItem(AUTH_KEY, newToken)
     setToken(newToken)
+    setUser(newUser)
   }
 
   function handleLogout() {
     window.localStorage.removeItem(AUTH_KEY)
     setToken(null)
+    setUser(null)
   }
 
   if (!checked) return null
 
-  return token ? (
-    <Dashboard token={token} onLogout={handleLogout} />
+  return token && user ? (
+    <Dashboard token={token} user={user} onLogout={handleLogout} />
   ) : (
     <LoginPage onLogin={handleLogin} />
   )
