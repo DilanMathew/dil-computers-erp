@@ -1,8 +1,18 @@
 # DIL Computers App
 
 React (Vite) frontend + Node/Express backend, backed by Postgres. Ships a
-login screen with a hardcoded account, and — once logged in — a searchable,
-paginated view of the product catalogue.
+login screen with a hardcoded account, and — once logged in — a dashboard
+with two sections:
+
+- **Create Quotation** — pick a product category, search for a product by
+  name, and set a quantity; the catalogue price auto-populates. Final price
+  starts empty — tick "Same as catalogue price" to use the catalogue price
+  as-is, or leave it unticked and type a discounted price. Add as many
+  products as needed, then **Create Quotation (PDF)** generates and
+  downloads a filled-in quotation PDF (quotation #, date, customer, line
+  items, and grand total) straight to your computer — no server round trip.
+- **Product Catalogue** — the original searchable, paginated view of the
+  full product catalogue.
 
 - Username: `admin`
 - Password: `admin123`

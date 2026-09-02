@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import Catalogue from './Catalogue'
+import Dashboard from './Dashboard'
 
 const AUTH_KEY = 'dil_auth_token'
 
@@ -93,7 +93,7 @@ export default function App() {
   if (!checked) return null
 
   return token ? (
-    <Catalogue token={token} onLogout={handleLogout} />
+    <Dashboard token={token} onLogout={handleLogout} />
   ) : (
     <LoginPage onLogin={handleLogin} />
   )

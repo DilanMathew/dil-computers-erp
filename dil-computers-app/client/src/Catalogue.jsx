@@ -1,11 +1,8 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, AuthError } from './api'
+import { formatPrice } from './format'
 
 const PAGE_SIZE = 50
-
-function formatPrice(value) {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value)
-}
 
 export default function Catalogue({ token, onLogout }) {
   const [categories, setCategories] = useState([])
@@ -77,22 +74,18 @@ export default function Catalogue({ token, onLogout }) {
   }, [token, category, debouncedSearch, page, onLogout])
 
   return (
-    <div style={styles.page}>
-      <div style={styles.shell}>
-        <header style={styles.header}>
-          <div>
-            <h1 style={styles.title}>Product Catalogue</h1>
-            <p style={styles.subtitle}>
-              {total.toLocaleString()} products
-              {category ? ` in ${category}` : ''}
-            </p>
-          </div>
-          <button style={styles.logoutButton} onClick={onLogout}>
-            Log out
-          </button>
-        </header>
+    <div>
+      <header style={styles.header}>
+        <div>
+          <h2 style={styles.title}>Product Catalogue</h2>
+          <p style={styles.subtitle}>
+            {total.toLocaleString()} products
+            {category ? ` in ${category}` : ''}
+          </p>
+        </div>
+      </header>
 
-        <div style={styles.toolbar}>
+      <div style={styles.toolbar}>
           <input
             style={styles.search}
             type="text"
@@ -168,50 +161,23 @@ export default function Catalogue({ token, onLogout }) {
             Next
           </button>
         </div>
-      </div>
     </div>
   )
 }
 
 const styles = {
-  page: {
-    minHeight: '100vh',
-    background: '#f1f5f9',
-    padding: '32px 16px',
-  },
-  shell: {
-    maxWidth: 1000,
-    margin: '0 auto',
-    background: '#fff',
-    borderRadius: 12,
-    boxShadow: '0 10px 30px rgba(15, 23, 42, 0.08)',
-    padding: 24,
-  },
   header: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
     marginBottom: 20,
   },
   title: {
     margin: 0,
-    fontSize: 22,
+    fontSize: 18,
     color: '#0f172a',
   },
   subtitle: {
     margin: '4px 0 0 0',
     color: '#64748b',
     fontSize: 14,
-  },
-  logoutButton: {
-    padding: '8px 14px',
-    borderRadius: 8,
-    border: '1px solid #cbd5e1',
-    background: '#fff',
-    color: '#334155',
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: 'pointer',
   },
   toolbar: {
     display: 'flex',
