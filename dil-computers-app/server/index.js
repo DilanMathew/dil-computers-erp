@@ -17,7 +17,9 @@ app.use(express.json())
 
 // Shared validation for the line items on a quotation or invoice. Returns
 // { ok: true, items: <normalized items> } or { ok: false, message }.
-function validateLineItems(rawItems) {
+// Pass requireProductId: true for invoices, since stock is decremented
+// against a specific products.id.
+function validateLineItems(rawItems, { requireProductId = false } = {}) {
   if (!Array.isArray(rawItems) || rawItems.length === 0) {
     return { ok: false, message: 'At least one line item is required' }
   }
@@ -29,9 +31,13 @@ function validateLineItems(rawItems) {
     const quantity = Number(raw?.quantity)
     const catalPrice = Number(raw?.catalPrice)
     const finalPrice = Number(raw?.finalPrice)
+    const productId = Number.isInteger(raw?.productId) ? raw.productId : parseInt(raw?.productId, 10)
 
     if (!category || !name) {
       return { ok: false, message: 'Each line item needs a category and product name' }
+    }
+    if (requireProductId && (!Number.isInteger(productId) || productId <= 0)) {
+      return { ok: false, message: `Missing catalogue reference for "${name}" — re-add it from the picker.` }
     }
     if (!Number.isFinite(quantity) || quantity <= 0) {
       return { ok: false, message: `Invalid quantity for "${name}"` }
@@ -44,6 +50,7 @@ function validateLineItems(rawItems) {
     }
 
     items.push({
+      productId: Number.isInteger(productId) && productId > 0 ? productId : null,
       category,
       name,
       quantity,
@@ -179,28 +186,43 @@ app.post('/api/quotations', requireAuth, async (req, res) => {
   }
 })
 
+// Paginated + searchable, same shape as GET /api/invoices. Also used
+// (with a small pageSize and no page) as a lightweight lookup for the
+// "reference quotation #" autocomplete on the invoice form.
 app.get('/api/quotations', requireAuth, async (req, res) => {
   try {
-    const limit = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 10, 1), 50)
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
+    const offset = (page - 1) * pageSize
+
     const params = []
     let where = ''
-
     if (req.query.q) {
       params.push(`%${req.query.q}%`)
       where = `WHERE quotation_number ILIKE $${params.length} OR customer_name ILIKE $${params.length}`
     }
 
-    params.push(limit)
-    const { rows } = await pool.query(
-      `SELECT id, quotation_number, quotation_date, customer_name, grand_total, created_at
+    const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM quotations ${where}`, params)
+    const total = countResult.rows[0].total
+
+    params.push(pageSize)
+    params.push(offset)
+    const itemsResult = await pool.query(
+      `SELECT id, quotation_number, quotation_date, customer_name, items, grand_total, created_at
        FROM quotations
        ${where}
        ORDER BY created_at DESC
-       LIMIT $${params.length}`,
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     )
 
-    res.json({ quotations: rows })
+    res.json({
+      items: itemsResult.rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
   } catch (err) {
     console.error('GET /api/quotations failed:', err)
     res.status(500).json({ message: 'Could not load quotations' })
@@ -208,6 +230,7 @@ app.get('/api/quotations', requireAuth, async (req, res) => {
 })
 
 app.post('/api/invoices', requireAuth, async (req, res) => {
+  const client = await pool.connect()
   try {
     const {
       invoiceNumber,
@@ -232,7 +255,7 @@ app.post('/api/invoices', requireAuth, async (req, res) => {
       return res.status(400).json({ message: 'Customer name is required' })
     }
 
-    const validation = validateLineItems(rawItems)
+    const validation = validateLineItems(rawItems, { requireProductId: true })
     if (!validation.ok) {
       return res.status(400).json({ message: validation.message })
     }
@@ -244,7 +267,33 @@ app.post('/api/invoices', requireAuth, async (req, res) => {
     const refQuotation =
       typeof quotationNumber === 'string' && quotationNumber.trim() ? quotationNumber.trim() : null
 
-    const { rows } = await pool.query(
+    await client.query('BEGIN')
+
+    // Reduce catalogue stock for every product sold, refusing the whole
+    // invoice (and rolling back any stock already deducted) if a product
+    // is missing or doesn't have enough left — no overselling.
+    for (const item of validation.items) {
+      const { rows: updated } = await client.query(
+        `UPDATE products SET quantity = quantity - $1 WHERE id = $2 AND quantity >= $1 RETURNING quantity`,
+        [item.quantity, item.productId]
+      )
+
+      if (updated.length === 0) {
+        const { rows: existing } = await client.query('SELECT quantity FROM products WHERE id = $1', [
+          item.productId,
+        ])
+        await client.query('ROLLBACK')
+
+        if (existing.length === 0) {
+          return res.status(400).json({ message: `Product "${item.name}" no longer exists in the catalogue.` })
+        }
+        return res.status(409).json({
+          message: `Not enough stock for "${item.name}" — requested ${item.quantity}, only ${existing[0].quantity} left.`,
+        })
+      }
+    }
+
+    const { rows } = await client.query(
       `INSERT INTO invoices
          (invoice_number, invoice_date, customer_name, customer_phone, customer_address,
           payment_method, quotation_number, items, grand_total)
@@ -254,10 +303,14 @@ app.post('/api/invoices', requireAuth, async (req, res) => {
       [number, invoiceDate, customer, phone, address, payment, refQuotation, JSON.stringify(validation.items), grandTotal]
     )
 
+    await client.query('COMMIT')
     res.status(201).json({ invoice: rows[0] })
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
     console.error('POST /api/invoices failed:', err)
     res.status(500).json({ message: 'Could not save invoice' })
+  } finally {
+    client.release()
   }
 })
 

@@ -117,6 +117,12 @@ export default function useLineItemBuilder({ token, onLogout }) {
     if (!Number.isFinite(qty) || qty <= 0) {
       return { ok: false, message: 'Enter a quantity greater than zero.' }
     }
+    if (qty > selectedProduct.quantity) {
+      return {
+        ok: false,
+        message: `Only ${selectedProduct.quantity} of "${selectedProduct.name}" left in stock.`,
+      }
+    }
 
     let resolvedFinalPrice
     if (sameAsCatalogue) {
@@ -132,6 +138,7 @@ export default function useLineItemBuilder({ token, onLogout }) {
       ok: true,
       item: {
         id: `${selectedProduct.id}-${Date.now()}`,
+        productId: selectedProduct.id,
         category,
         name: selectedProduct.name,
         quantity: qty,

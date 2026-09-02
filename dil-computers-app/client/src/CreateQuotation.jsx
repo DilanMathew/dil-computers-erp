@@ -13,6 +13,7 @@ export default function CreateQuotation({ token, onLogout }) {
 
   const [lineItems, setLineItems] = useState([])
   const [formError, setFormError] = useState('')
+  const [successMessage, setSuccessMessage] = useState('')
   const [saving, setSaving] = useState(false)
 
   const builder = useLineItemBuilder({ token, onLogout })
@@ -34,6 +35,7 @@ export default function CreateQuotation({ token, onLogout }) {
 
   async function handleCreateQuotation() {
     setFormError('')
+    setSuccessMessage('')
     if (lineItems.length === 0) {
       setFormError('Add at least one product to the quotation first.')
       return
@@ -64,6 +66,15 @@ export default function CreateQuotation({ token, onLogout }) {
         fields: [['Customer', customerName]],
         items: lineItems,
       })
+
+      setSuccessMessage(`Quotation ${quotationNumber.trim()} saved.`)
+
+      // Reset for the next quotation — otherwise the next save would
+      // re-submit these same line items under a stale, already-used number.
+      setLineItems([])
+      setCustomerName('')
+      setQuotationNumber(generateDocumentNumber('Q'))
+      setQuotationDate(todayIso())
     } catch (err) {
       if (err instanceof AuthError) {
         onLogout()
@@ -132,6 +143,8 @@ export default function CreateQuotation({ token, onLogout }) {
       </div>
 
       <LineItemsTable items={lineItems} onRemove={handleRemoveItem} />
+
+      {successMessage && <div style={styles.success}>{successMessage}</div>}
 
       <div style={styles.footer}>
         <span style={styles.grandTotal}>Grand total: {formatPrice(grandTotal)}</span>
@@ -202,6 +215,14 @@ const styles = {
     borderRadius: 8,
     background: '#fef2f2',
     color: '#b91c1c',
+    fontSize: 13,
+  },
+  success: {
+    marginTop: 16,
+    padding: '10px 12px',
+    borderRadius: 8,
+    background: '#f0fdf4',
+    color: '#166534',
     fontSize: 13,
   },
   addButton: {
