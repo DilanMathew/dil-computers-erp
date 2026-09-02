@@ -6,6 +6,7 @@ import CreateInvoice from './CreateInvoice'
 import Invoices from './Invoices'
 import Users from './Users'
 import AuditLog from './AuditLog'
+import Customers from './Customers'
 
 // Which roles see each tab. 'sales' can create and view sales documents;
 // 'accountant' can view them but not create (read-only); 'admin' sees
@@ -15,6 +16,7 @@ const TABS = [
   { id: 'quotations', label: 'Quotations', roles: ['admin', 'sales', 'accountant'], Component: Quotations },
   { id: 'invoice', label: 'Create Invoice', roles: ['admin', 'sales'], Component: CreateInvoice },
   { id: 'invoices', label: 'Invoices', roles: ['admin', 'sales', 'accountant'], Component: Invoices },
+  { id: 'customers', label: 'Customers', roles: ['admin', 'sales', 'accountant'], Component: Customers },
   { id: 'catalogue', label: 'Product Catalogue', roles: ['admin', 'sales', 'accountant'], Component: Catalogue },
   { id: 'users', label: 'Users', roles: ['admin'], Component: Users },
   { id: 'audit', label: 'Audit Log', roles: ['admin'], Component: AuditLog },

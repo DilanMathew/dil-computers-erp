@@ -5,11 +5,13 @@ import { buildDocumentPdf, generateDocumentNumber, todayIso } from './documentPd
 import useLineItemBuilder from './useLineItemBuilder'
 import ProductPicker from './ProductPicker'
 import LineItemsTable from './LineItemsTable'
+import CustomerPicker from './CustomerPicker'
 
 export default function CreateQuotation({ token, onLogout }) {
   const [quotationNumber, setQuotationNumber] = useState(() => generateDocumentNumber('Q'))
   const [quotationDate, setQuotationDate] = useState(todayIso)
   const [customerName, setCustomerName] = useState('')
+  const [customerId, setCustomerId] = useState(null)
 
   const [lineItems, setLineItems] = useState([])
   const [formError, setFormError] = useState('')
@@ -54,6 +56,7 @@ export default function CreateQuotation({ token, onLogout }) {
           quotationNumber: quotationNumber.trim(),
           quotationDate,
           customerName,
+          customerId,
           items: lineItems,
         }),
       })
@@ -73,6 +76,7 @@ export default function CreateQuotation({ token, onLogout }) {
       // re-submit these same line items under a stale, already-used number.
       setLineItems([])
       setCustomerName('')
+      setCustomerId(null)
       setQuotationNumber(generateDocumentNumber('Q'))
       setQuotationDate(todayIso())
     } catch (err) {
@@ -118,17 +122,22 @@ export default function CreateQuotation({ token, onLogout }) {
             onChange={(e) => setQuotationDate(e.target.value)}
           />
         </div>
-        <div>
-          <label style={styles.label} htmlFor="customerName">Customer name (optional)</label>
-          <input
-            id="customerName"
-            style={styles.input}
-            type="text"
-            placeholder="Walk-in customer"
-            value={customerName}
-            onChange={(e) => setCustomerName(e.target.value)}
-          />
-        </div>
+        <CustomerPicker
+          token={token}
+          onLogout={onLogout}
+          id="customerName"
+          label="Customer"
+          value={customerName}
+          placeholder="Walk-in customer"
+          onInputChange={(text) => {
+            setCustomerName(text)
+            setCustomerId(null)
+          }}
+          onSelect={(customer) => {
+            setCustomerName(customer.name)
+            setCustomerId(customer.id)
+          }}
+        />
       </div>
 
       <div style={styles.card}>

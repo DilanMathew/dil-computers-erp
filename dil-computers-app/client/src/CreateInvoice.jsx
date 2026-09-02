@@ -5,6 +5,7 @@ import { buildDocumentPdf, generateDocumentNumber, todayIso } from './documentPd
 import useLineItemBuilder from './useLineItemBuilder'
 import ProductPicker from './ProductPicker'
 import LineItemsTable from './LineItemsTable'
+import CustomerPicker from './CustomerPicker'
 
 const PAYMENT_METHODS = ['Cash', 'Card', 'UPI', 'Bank Transfer', 'Other']
 
@@ -12,9 +13,12 @@ export default function CreateInvoice({ token, onLogout }) {
   const [invoiceNumber, setInvoiceNumber] = useState(() => generateDocumentNumber('INV'))
   const [invoiceDate, setInvoiceDate] = useState(todayIso)
   const [customerName, setCustomerName] = useState('')
+  const [customerId, setCustomerId] = useState(null)
   const [customerPhone, setCustomerPhone] = useState('')
   const [customerAddress, setCustomerAddress] = useState('')
   const [paymentMethod, setPaymentMethod] = useState(PAYMENT_METHODS[0])
+  const [fullyPaid, setFullyPaid] = useState(true)
+  const [amountReceived, setAmountReceived] = useState('')
 
   const [quotationQuery, setQuotationQuery] = useState('')
   const [quotationSuggestions, setQuotationSuggestions] = useState([])
@@ -85,6 +89,19 @@ export default function CreateInvoice({ token, onLogout }) {
       return
     }
 
+    let received = grandTotal
+    if (!fullyPaid) {
+      received = amountReceived === '' ? 0 : Number(amountReceived)
+      if (!Number.isFinite(received) || received < 0) {
+        setFormError('Enter a valid amount received (0 or more).')
+        return
+      }
+      if (received > grandTotal) {
+        setFormError('Amount received cannot exceed the invoice total.')
+        return
+      }
+    }
+
     setSaving(true)
     try {
       await apiFetch('/api/invoices', token, {
@@ -94,14 +111,17 @@ export default function CreateInvoice({ token, onLogout }) {
           invoiceNumber: invoiceNumber.trim(),
           invoiceDate,
           customerName: customerName.trim(),
+          customerId,
           customerPhone,
           customerAddress,
           paymentMethod,
           quotationNumber: quotationQuery,
           items: lineItems,
+          amountReceived: received,
         }),
       })
 
+      const balanceDue = grandTotal - received
       buildDocumentPdf({
         docLabel: 'Invoice',
         filePrefix: 'Invoice',
@@ -113,20 +133,30 @@ export default function CreateInvoice({ token, onLogout }) {
           ['Address', customerAddress],
           ['Payment Method', paymentMethod],
           ['Quotation Ref', quotationQuery],
+          ...(balanceDue > 0.01
+            ? [['Amount Paid', formatPrice(received)], ['Balance Due', formatPrice(balanceDue)]]
+            : []),
         ],
         items: lineItems,
       })
 
-      setSuccessMessage(`Invoice ${invoiceNumber.trim()} saved and stock updated.`)
+      setSuccessMessage(
+        balanceDue > 0.01
+          ? `Invoice ${invoiceNumber.trim()} saved — ${formatPrice(balanceDue)} still due. Stock updated.`
+          : `Invoice ${invoiceNumber.trim()} saved and stock updated.`
+      )
 
       // Reset for the next invoice — otherwise the next save would
       // re-submit these same line items under a stale, already-used number,
       // and double-deduct stock for products already sold above.
       setLineItems([])
       setCustomerName('')
+      setCustomerId(null)
       setCustomerPhone('')
       setCustomerAddress('')
       setPaymentMethod(PAYMENT_METHODS[0])
+      setFullyPaid(true)
+      setAmountReceived('')
       setQuotationQuery('')
       setInvoiceNumber(generateDocumentNumber('INV'))
       setInvoiceDate(todayIso())
@@ -187,17 +217,25 @@ export default function CreateInvoice({ token, onLogout }) {
       </div>
 
       <div style={styles.detailsGrid}>
-        <div>
-          <label style={styles.label} htmlFor="customerName">Customer name</label>
-          <input
-            id="customerName"
-            style={styles.input}
-            type="text"
-            placeholder="Required"
-            value={customerName}
-            onChange={(e) => setCustomerName(e.target.value)}
-          />
-        </div>
+        <CustomerPicker
+          token={token}
+          onLogout={onLogout}
+          id="customerName"
+          label="Customer name"
+          required
+          placeholder="Required"
+          value={customerName}
+          onInputChange={(text) => {
+            setCustomerName(text)
+            setCustomerId(null)
+          }}
+          onSelect={(customer) => {
+            setCustomerName(customer.name)
+            setCustomerId(customer.id)
+            if (customer.phone) setCustomerPhone(customer.phone)
+            if (customer.address) setCustomerAddress(customer.address)
+          }}
+        />
         <div>
           <label style={styles.label} htmlFor="customerPhone">Customer phone (optional)</label>
           <input
@@ -265,6 +303,41 @@ export default function CreateInvoice({ token, onLogout }) {
       </div>
 
       <LineItemsTable items={lineItems} onRemove={handleRemoveItem} />
+
+      <div style={styles.paymentCard}>
+        <label style={styles.checkboxRow}>
+          <input
+            type="checkbox"
+            checked={fullyPaid}
+            onChange={(e) => {
+              setFullyPaid(e.target.checked)
+              if (e.target.checked) setAmountReceived('')
+            }}
+          />
+          Paid in full now
+        </label>
+
+        {!fullyPaid && (
+          <div style={styles.amountRow}>
+            <div>
+              <label style={styles.label} htmlFor="amountReceived">Amount received now</label>
+              <input
+                id="amountReceived"
+                style={styles.input}
+                type="number"
+                min="0"
+                step="0.01"
+                placeholder="0 for a credit sale"
+                value={amountReceived}
+                onChange={(e) => setAmountReceived(e.target.value)}
+              />
+            </div>
+            <div style={styles.balanceNote}>
+              Balance due: {formatPrice(Math.max(grandTotal - (Number(amountReceived) || 0), 0))}
+            </div>
+          </div>
+        )}
+      </div>
 
       {successMessage && <div style={styles.success}>{successMessage}</div>}
 
@@ -375,6 +448,35 @@ const styles = {
     background: '#f0fdf4',
     color: '#166534',
     fontSize: 13,
+  },
+  paymentCard: {
+    border: '1px solid #e2e8f0',
+    borderRadius: 8,
+    padding: 16,
+    marginTop: 16,
+    background: '#f8fafc',
+  },
+  checkboxRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    fontSize: 14,
+    fontWeight: 600,
+    color: '#334155',
+    cursor: 'pointer',
+  },
+  amountRow: {
+    display: 'flex',
+    alignItems: 'flex-end',
+    gap: 16,
+    marginTop: 12,
+    flexWrap: 'wrap',
+  },
+  balanceNote: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: '#b45309',
+    paddingBottom: 10,
   },
   addButton: {
     marginTop: 14,

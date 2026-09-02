@@ -78,3 +78,45 @@ ALTER TABLE quotations ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER REFER
 ALTER TABLE quotations ADD COLUMN IF NOT EXISTS created_by_username TEXT;
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS created_by_username TEXT;
+
+-- Saved customer records. Linking a quotation/invoice to one is optional —
+-- customer_name (already on both tables) stays as a point-in-time snapshot
+-- either way, so a walk-in sale with no saved record still prints fine and
+-- a customer's name/phone/address can change later without rewriting history.
+CREATE TABLE IF NOT EXISTS customers (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  phone TEXT,
+  email TEXT,
+  address TEXT,
+  notes TEXT,
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_username TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS customers_name_idx ON customers USING gin (to_tsvector('simple', name));
+CREATE INDEX IF NOT EXISTS customers_phone_idx ON customers (phone);
+
+ALTER TABLE quotations ADD COLUMN IF NOT EXISTS customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL;
+
+-- Payments against an invoice. An invoice's status (paid/partially paid/
+-- unpaid) is derived from SUM(payments.amount) vs invoices.grand_total
+-- rather than stored, so it can never drift out of sync. Creating an
+-- invoice for the full amount up front (the common case) inserts one
+-- payment row automatically; partial/credit sales just start with less
+-- (or none) and more can be recorded later from the Invoices section.
+CREATE TABLE IF NOT EXISTS payments (
+  id SERIAL PRIMARY KEY,
+  invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  amount NUMERIC(12, 2) NOT NULL,
+  payment_method TEXT,
+  payment_date DATE NOT NULL,
+  notes TEXT,
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_username TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS payments_invoice_id_idx ON payments (invoice_id);
