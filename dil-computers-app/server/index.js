@@ -209,10 +209,6 @@ app.post('/api/login', loginRateLimit, async (req, res) => {
   }
 })
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' })
-})
-
 // Public (no auth) — printed on quotation/invoice PDFs. Not a secret; the
 // same info would be on a printed letterhead.
 app.get('/api/company-info', (req, res) => {
@@ -1052,7 +1048,7 @@ function validatePurchaseItems(rawItems) {
   return { ok: true, items }
 }
 
-app.post('/api/purchase-orders', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+app.post('/api/purchase-orders', requireAuth, requireRole('admin', 'sales', 'staff'), async (req, res) => {
   const client = await pool.connect()
   try {
     const { poNumber, poDate, supplierName, supplierId, items: rawItems } = req.body || {}
@@ -1128,7 +1124,9 @@ app.post('/api/purchase-orders', requireAuth, requireRole('admin', 'sales'), asy
   }
 })
 
-app.get('/api/purchase-orders', requireAuth, async (req, res) => {
+// Excludes 'staff' deliberately — staff can create purchase orders but not
+// browse the full PO history (see /api/quotations below for the same rule).
+app.get('/api/purchase-orders', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
@@ -1641,7 +1639,7 @@ app.patch('/api/repair-tickets/:id', requireAuth, requireRole('admin', 'sales'),
   }
 })
 
-app.post('/api/quotations', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+app.post('/api/quotations', requireAuth, requireRole('admin', 'sales', 'staff'), async (req, res) => {
   try {
     const { quotationNumber, quotationDate, customerName, customerId, items: rawItems, gstRate } = req.body || {}
 
@@ -1701,7 +1699,10 @@ app.post('/api/quotations', requireAuth, requireRole('admin', 'sales'), async (r
 // Paginated + searchable, same shape as GET /api/invoices. Also used
 // (with a small pageSize and no page) as a lightweight lookup for the
 // "reference quotation #" autocomplete on the invoice form.
-app.get('/api/quotations', requireAuth, async (req, res) => {
+// Excludes 'staff' deliberately — the role gets create-only access to
+// quotations/POs (see the roles README section); browsing the saved list
+// is not part of that.
+app.get('/api/quotations', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
@@ -2284,6 +2285,346 @@ app.get('/api/dashboard-summary', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('GET /api/dashboard-summary failed:', err)
     res.status(500).json({ message: 'Could not load dashboard summary' })
+  }
+})
+
+// --- Staff Monitoring (HR roster) ---
+
+app.get('/api/staff', requireAuth, requireRole('admin', 'accountant'), async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
+    const offset = (page - 1) * pageSize
+
+    const params = []
+    let where = ''
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`)
+      where = `WHERE name ILIKE $${params.length} OR position ILIKE $${params.length}`
+    }
+    if (req.query.active === 'true' || req.query.active === 'false') {
+      params.push(req.query.active === 'true')
+      where += `${where ? ' AND' : 'WHERE'} active = $${params.length}`
+    }
+
+    const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM staff_members ${where}`, params)
+    const total = countResult.rows[0].total
+
+    params.push(pageSize)
+    params.push(offset)
+    const itemsResult = await pool.query(
+      `SELECT id, name, position, phone, email, join_date, salary, earned_leave_balance, active, notes,
+              created_by_username, created_at
+       FROM staff_members
+       ${where}
+       ORDER BY name ASC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    res.json({
+      items: itemsResult.rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
+  } catch (err) {
+    console.error('GET /api/staff failed:', err)
+    res.status(500).json({ message: 'Could not load staff' })
+  }
+})
+
+app.get('/api/staff/:id', requireAuth, requireRole('admin', 'accountant'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid staff id' })
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id, name, position, phone, email, join_date, salary, earned_leave_balance, active, notes,
+              created_by_username, created_at
+       FROM staff_members WHERE id = $1`,
+      [id]
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Staff member not found' })
+    }
+
+    const payroll = await pool.query(
+      `SELECT id, pay_period, payment_date, salary_amount, bonus_amount, reimbursement_amount,
+              (salary_amount + bonus_amount + reimbursement_amount) AS total_amount, notes, created_at
+       FROM payroll_records WHERE staff_id = $1 ORDER BY payment_date DESC, id DESC`,
+      [id]
+    )
+
+    res.json({ staff: rows[0], payrollRecords: payroll.rows })
+  } catch (err) {
+    console.error('GET /api/staff/:id failed:', err)
+    res.status(500).json({ message: 'Could not load staff member' })
+  }
+})
+
+app.post('/api/staff', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { name, position, phone, email, joinDate, salary, earnedLeaveBalance, notes } = req.body || {}
+
+    const cleanName = typeof name === 'string' ? name.trim() : ''
+    if (!cleanName) {
+      return res.status(400).json({ message: 'Name is required' })
+    }
+    const salaryNum = salary === undefined || salary === null || salary === '' ? 0 : Number(salary)
+    if (!Number.isFinite(salaryNum) || salaryNum < 0) {
+      return res.status(400).json({ message: 'Invalid salary' })
+    }
+    const leaveNum = earnedLeaveBalance === undefined || earnedLeaveBalance === null || earnedLeaveBalance === ''
+      ? 0 : Number(earnedLeaveBalance)
+    if (!Number.isFinite(leaveNum) || leaveNum < 0) {
+      return res.status(400).json({ message: 'Invalid earned leave balance' })
+    }
+    if (joinDate && !isValidDateString(joinDate)) {
+      return res.status(400).json({ message: 'Invalid join date' })
+    }
+
+    const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+
+    const { rows } = await pool.query(
+      `INSERT INTO staff_members
+         (name, position, phone, email, join_date, salary, earned_leave_balance, notes,
+          created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id, name, position, phone, email, join_date, salary, earned_leave_balance, active, notes,
+                 created_by_username, created_at`,
+      [cleanName, clean(position), clean(phone), clean(email), joinDate || null, salaryNum, leaveNum, clean(notes), req.user.id, req.user.username]
+    )
+    const staff = rows[0]
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'staff.create',
+      entityType: 'staff_member',
+      entityId: staff.id,
+      details: { name: cleanName },
+    })
+
+    res.status(201).json({ staff })
+  } catch (err) {
+    console.error('POST /api/staff failed:', err)
+    res.status(500).json({ message: 'Could not create staff member' })
+  }
+})
+
+app.patch('/api/staff/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid staff id' })
+    }
+
+    const sets = []
+    const params = []
+    const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+
+    if (typeof req.body?.name === 'string') {
+      const n = req.body.name.trim()
+      if (!n) {
+        return res.status(400).json({ message: 'Name cannot be blank' })
+      }
+      params.push(n)
+      sets.push(`name = $${params.length}`)
+    }
+    if (typeof req.body?.position === 'string') {
+      params.push(clean(req.body.position))
+      sets.push(`position = $${params.length}`)
+    }
+    if (typeof req.body?.phone === 'string') {
+      params.push(clean(req.body.phone))
+      sets.push(`phone = $${params.length}`)
+    }
+    if (typeof req.body?.email === 'string') {
+      params.push(clean(req.body.email))
+      sets.push(`email = $${params.length}`)
+    }
+    if (req.body?.joinDate !== undefined) {
+      if (req.body.joinDate && !isValidDateString(req.body.joinDate)) {
+        return res.status(400).json({ message: 'Invalid join date' })
+      }
+      params.push(req.body.joinDate || null)
+      sets.push(`join_date = $${params.length}`)
+    }
+    if (req.body?.salary !== undefined) {
+      const n = Number(req.body.salary)
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({ message: 'Invalid salary' })
+      }
+      params.push(n)
+      sets.push(`salary = $${params.length}`)
+    }
+    if (req.body?.earnedLeaveBalance !== undefined) {
+      const n = Number(req.body.earnedLeaveBalance)
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({ message: 'Invalid earned leave balance' })
+      }
+      params.push(n)
+      sets.push(`earned_leave_balance = $${params.length}`)
+    }
+    if (typeof req.body?.active === 'boolean') {
+      params.push(req.body.active)
+      sets.push(`active = $${params.length}`)
+    }
+    if (typeof req.body?.notes === 'string') {
+      params.push(clean(req.body.notes))
+      sets.push(`notes = $${params.length}`)
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ message: 'Nothing to update' })
+    }
+
+    params.push(id)
+    const { rows } = await pool.query(
+      `UPDATE staff_members SET ${sets.join(', ')} WHERE id = $${params.length}
+       RETURNING id, name, position, phone, email, join_date, salary, earned_leave_balance, active, notes,
+                 created_by_username, created_at`,
+      params
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Staff member not found' })
+    }
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'staff.update',
+      entityType: 'staff_member',
+      entityId: id,
+      details: { fields: Object.keys(req.body || {}) },
+    })
+
+    res.json({ staff: rows[0] })
+  } catch (err) {
+    console.error('PATCH /api/staff/:id failed:', err)
+    res.status(500).json({ message: 'Could not update staff member' })
+  }
+})
+
+// --- Payroll & Compensation ---
+
+app.get('/api/payroll', requireAuth, requireRole('admin', 'accountant'), async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
+    const offset = (page - 1) * pageSize
+
+    const conditions = []
+    const params = []
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`)
+      conditions.push(`(s.name ILIKE $${params.length} OR p.pay_period ILIKE $${params.length})`)
+    }
+    if (req.query.staffId) {
+      const staffId = parseInt(req.query.staffId, 10)
+      if (Number.isInteger(staffId)) {
+        params.push(staffId)
+        conditions.push(`p.staff_id = $${params.length}`)
+      }
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM payroll_records p LEFT JOIN staff_members s ON s.id = p.staff_id ${where}`,
+      params
+    )
+    const total = countResult.rows[0].total
+
+    params.push(pageSize)
+    params.push(offset)
+    const itemsResult = await pool.query(
+      `SELECT p.id, p.staff_id, s.name AS staff_name, p.pay_period, p.payment_date,
+              p.salary_amount, p.bonus_amount, p.reimbursement_amount,
+              (p.salary_amount + p.bonus_amount + p.reimbursement_amount) AS total_amount,
+              p.notes, p.created_by_username, p.created_at
+       FROM payroll_records p
+       LEFT JOIN staff_members s ON s.id = p.staff_id
+       ${where}
+       ORDER BY p.payment_date DESC, p.id DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    res.json({
+      items: itemsResult.rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
+  } catch (err) {
+    console.error('GET /api/payroll failed:', err)
+    res.status(500).json({ message: 'Could not load payroll records' })
+  }
+})
+
+app.post('/api/payroll', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { staffId, payPeriod, paymentDate, salaryAmount, bonusAmount, reimbursementAmount, notes } = req.body || {}
+
+    const sid = parseInt(staffId, 10)
+    if (!Number.isInteger(sid)) {
+      return res.status(400).json({ message: 'A staff member is required' })
+    }
+    const period = typeof payPeriod === 'string' ? payPeriod.trim() : ''
+    if (!period) {
+      return res.status(400).json({ message: 'Pay period is required (e.g. "2026-09")' })
+    }
+    if (!isValidDateString(paymentDate)) {
+      return res.status(400).json({ message: 'A valid payment date (YYYY-MM-DD) is required' })
+    }
+
+    const num = (v) => {
+      if (v === undefined || v === null || v === '') return 0
+      return Number(v)
+    }
+    const salaryNum = num(salaryAmount)
+    const bonusNum = num(bonusAmount)
+    const reimbursementNum = num(reimbursementAmount)
+    for (const [label, n] of [['salary amount', salaryNum], ['bonus amount', bonusNum], ['reimbursement amount', reimbursementNum]]) {
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({ message: `Invalid ${label}` })
+      }
+    }
+    if (salaryNum === 0 && bonusNum === 0 && reimbursementNum === 0) {
+      return res.status(400).json({ message: 'Enter at least one non-zero amount' })
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO payroll_records
+         (staff_id, pay_period, payment_date, salary_amount, bonus_amount, reimbursement_amount, notes,
+          created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, staff_id, pay_period, payment_date, salary_amount, bonus_amount, reimbursement_amount,
+                 (salary_amount + bonus_amount + reimbursement_amount) AS total_amount,
+                 notes, created_by_username, created_at`,
+      [sid, period, paymentDate, salaryNum, bonusNum, reimbursementNum,
+        typeof notes === 'string' && notes.trim() ? notes.trim() : null, req.user.id, req.user.username]
+    )
+    const record = rows[0]
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'payroll.create',
+      entityType: 'payroll_record',
+      entityId: record.id,
+      details: { staffId: sid, payPeriod: period, totalAmount: record.total_amount },
+    })
+
+    res.status(201).json({ payrollRecord: record })
+  } catch (err) {
+    if (err.code === '23503') {
+      return res.status(400).json({ message: 'That staff member no longer exists' })
+    }
+    console.error('POST /api/payroll failed:', err)
+    res.status(500).json({ message: 'Could not create payroll record' })
   }
 })
 

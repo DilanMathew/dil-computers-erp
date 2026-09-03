@@ -2,7 +2,8 @@
 
 React (Vite) frontend + Node/Express backend, backed by Postgres. Ships a
 login screen backed by real (multi-user, role-based) accounts, and — once
-logged in — a dashboard with sections scoped to your role:
+logged in — a dashboard with a left-hand sidebar, grouped by area, showing
+only the sections your role can use:
 
 - **Overview** *(all roles)* — the landing tab: sales this month,
   outstanding receivables, low-stock item count, open repair ticket count,
@@ -114,13 +115,25 @@ logged in — a dashboard with sections scoped to your role:
   can't drift). An expandable row shows contract details, every repair
   ticket linked to it, and (admin/sales) editing to extend the end date,
   adjust the amount, or cancel the contract.
+- **Staff Monitoring** *(admin, accountant)* — the HR roster: total staff
+  count, each person's position, salary, and earned leave balance
+  (a plain stored balance, admin-adjustable — not a full accrual/request
+  workflow). Admin can add staff members and edit any field; accountant
+  sees it all read-only. Independent of login accounts — not every
+  employee needs system access, and this roster tracks all of them
+  (technicians, sales reps, etc.), not just the ones who log in.
+- **Payroll & Compensation** *(admin, accountant)* — a running record of
+  what's actually been paid: salary, bonus, and reimbursement amounts per
+  payment, against a staff member and a pay period. Admin records new
+  payments; accountant views the full history read-only. Each staff
+  member's own row in Staff Monitoring also shows their payroll history.
 - **Users** *(admin only)* — create accounts, assign roles (`admin` /
-  `sales` / `accountant`), deactivate/reactivate accounts, reset passwords.
-  An admin can't deactivate or demote their own account (so there's always
-  at least one working admin).
+  `sales` / `accountant` / `staff`), deactivate/reactivate accounts, reset
+  passwords. An admin can't deactivate or demote their own account (so
+  there's always at least one working admin).
 - **Audit Log** *(admin only)* — who created which quotation/invoice/
   customer/user/payment/repair ticket/AMC contract/credit note/bulk
-  import and when, most recent first.
+  import/staff record/payroll record and when, most recent first.
 
 ### Infrastructure & security
 
@@ -141,12 +154,16 @@ logged in — a dashboard with sections scoped to your role:
 
 | Role | Can do |
 |---|---|
-| `admin` | Everything, including Users and the Audit Log |
-| `sales` | Browse the catalogue, create and view quotations/invoices |
-| `accountant` | View quotations/invoices/catalogue (read-only) |
+| `admin` | Everything, including Users, the Audit Log, and HR/payroll editing |
+| `sales` | Browse the catalogue, create and view quotations/invoices/etc. |
+| `accountant` | View quotations/invoices/catalogue/HR/payroll (read-only) |
+| `staff` | Create-only: quotations and purchase orders. No list/view access to those or anything else — the narrowest role in the app |
 
 Every restriction is enforced server-side (not just hidden in the UI) —
-each API route checks the role on the request's token.
+each API route checks the role on the request's token. `staff` in
+particular is enforced at the API level, not just by hiding sidebar
+tabs: `GET /api/quotations` and `GET /api/purchase-orders` explicitly
+exclude it, so even a direct API call can't browse those lists.
 
 ### First login
 
@@ -159,6 +176,16 @@ app starts against an empty database:
 (Override via the `ADMIN_USERNAME` / `ADMIN_PASSWORD` env vars, read only
 during that first bootstrap.) From then on, manage accounts from the
 **Users** section — there's no code-level password to change later.
+
+A default `staff` demo account is also created automatically (on any
+database, not just an empty one — it checks for this specific username):
+
+- Username: `staff1`
+- Password: `staff123`
+
+It's a normal account from that point on — reset its password, deactivate
+it, or change its role from **Users** like any other. The seed step won't
+recreate it once it exists, so those changes stick across deploys.
 
 ## Environment variables
 
@@ -297,9 +324,20 @@ name/quantity/cost price per line; creating one increases the referenced
 products' `quantity` and sets their `cost_price` in the same transaction.
 
 **`users`** — accounts, bcrypt-hashed passwords, and a `role` (`admin` /
-`sales` / `accountant`). A bootstrap admin is inserted automatically the
-first time the app runs against an empty `users` table (see "First login"
-above); every account after that is created through the Users section.
+`sales` / `accountant` / `staff`). A bootstrap admin is inserted
+automatically the first time the app runs against an empty `users` table,
+and a default `staff1` account is inserted on any database that doesn't
+already have one (see "First login" above); every account after that is
+created through the Users section.
+
+**`staff_members`** and **`payroll_records`** — the HR roster and its
+payment history, written by `POST /api/staff` and `POST /api/payroll`.
+`staff_members` is intentionally not tied to `users` — `user_id` is an
+optional link for the (likely common) case of someone being both an
+employee and a login, but neither table requires the other. A payroll
+record's `total_amount` is always derived as `salary_amount +
+bonus_amount + reimbursement_amount`, same "compute, don't store" pattern
+as invoice payment status and AMC contract status.
 
 **`customers`** — saved customer records (name, phone, email, address,
 notes), written by `POST /api/customers`. `name` is the only required
@@ -318,6 +356,7 @@ can't drift out of sync with the payments actually on record.
 `payment.record`, `product.update`, `supplier.create`, `supplier.update`,
 `purchase_order.create`, `amc_contract.create`, `amc_contract.update`,
 `repair_ticket.create`, `repair_ticket.update`, `credit_note.create`,
-`product.bulk_import`), who did it, and a small JSON detail snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so
+`product.bulk_import`, `staff.create`, `staff.update`, `payroll.create`),
+who did it, and a small JSON detail snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so
 deleting an account, if that's ever added, wouldn't take its history with
 it — `username` is kept alongside as a permanent snapshot either way.
