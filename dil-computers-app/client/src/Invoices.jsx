@@ -235,6 +235,11 @@ export default function Invoices({ token, user, onLogout }) {
                             ))}
                           </tbody>
                         </table>
+                        {Number(inv.gst_rate) > 0 && (
+                          <div style={styles.totalsNote}>
+                            Subtotal: {formatPrice(inv.subtotal)} · GST ({inv.gst_rate}%): {formatPrice(inv.gst_amount)} · Grand total: {formatPrice(inv.grand_total)}
+                          </div>
+                        )}
 
                         <div style={styles.paymentsSection}>
                           <h4 style={styles.paymentsTitle}>
@@ -413,6 +418,13 @@ const styles = {
     padding: '6px 10px',
     borderBottom: '1px solid #f1f5f9',
     color: '#0f172a',
+  },
+  totalsNote: {
+    marginTop: 8,
+    marginBottom: 10,
+    fontSize: 12,
+    color: '#334155',
+    fontWeight: 600,
   },
   paymentsSection: {
     marginTop: 4,

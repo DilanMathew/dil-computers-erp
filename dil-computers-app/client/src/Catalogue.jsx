@@ -1,10 +1,77 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { apiFetch, AuthError } from './api'
 import { formatPrice } from './format'
 
 const PAGE_SIZE = 50
 
-export default function Catalogue({ token, onLogout }) {
+function ProductManageRow({ token, onLogout, product, onSaved }) {
+  const [reorderThreshold, setReorderThreshold] = useState(product.reorder_threshold ?? '')
+  const [hsnCode, setHsnCode] = useState(product.hsn_code || '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleSave() {
+    setSaving(true)
+    setError('')
+    try {
+      await apiFetch(`/api/products/${product.id}`, token, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reorderThreshold: reorderThreshold === '' ? null : reorderThreshold,
+          hsnCode,
+        }),
+      })
+      onSaved()
+    } catch (err) {
+      if (err instanceof AuthError) onLogout()
+      else setError(err.message || 'Could not save changes.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div style={styles.manageRow}>
+      <div>
+        <label style={styles.manageLabel}>Reorder at (stock ≤ this triggers Low Stock)</label>
+        <input
+          style={styles.manageInput}
+          type="number"
+          min="0"
+          step="1"
+          placeholder="Not set"
+          value={reorderThreshold}
+          onChange={(e) => setReorderThreshold(e.target.value)}
+        />
+      </div>
+      <div>
+        <label style={styles.manageLabel}>HSN code</label>
+        <input
+          style={styles.manageInput}
+          type="text"
+          placeholder="Not set"
+          value={hsnCode}
+          onChange={(e) => setHsnCode(e.target.value)}
+        />
+      </div>
+      <div>
+        <label style={styles.manageLabel}>Last cost price</label>
+        <input style={styles.manageInput} type="text" readOnly value={product.cost_price ? formatPrice(product.cost_price) : '—'} />
+      </div>
+      <div style={styles.manageActions}>
+        <button type="button" style={styles.smallButton} onClick={handleSave} disabled={saving}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {error && <span style={styles.inlineError}>{error}</span>}
+      </div>
+    </div>
+  )
+}
+
+export default function Catalogue({ token, user, onLogout }) {
+  const canManage = user?.role === 'admin'
+
   const [categories, setCategories] = useState([])
   const [category, setCategory] = useState('')
   const [search, setSearch] = useState('')
@@ -16,6 +83,8 @@ export default function Catalogue({ token, onLogout }) {
   const [totalPages, setTotalPages] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [expandedId, setExpandedId] = useState(null)
+  const [refreshKey, setRefreshKey] = useState(0)
 
   // Debounce the search box so we're not firing a request per keystroke.
   useEffect(() => {
@@ -71,7 +140,7 @@ export default function Catalogue({ token, onLogout }) {
     return () => {
       cancelled = true
     }
-  }, [token, category, debouncedSearch, page, onLogout])
+  }, [token, category, debouncedSearch, page, onLogout, refreshKey])
 
   return (
     <div>
@@ -115,6 +184,7 @@ export default function Catalogue({ token, onLogout }) {
               <tr>
                 <th style={styles.th}>Category</th>
                 <th style={styles.th}>Product</th>
+                <th style={styles.th}>HSN</th>
                 <th style={{ ...styles.th, textAlign: 'right' }}>Price</th>
                 <th style={{ ...styles.th, textAlign: 'right' }}>Quantity</th>
               </tr>
@@ -122,20 +192,38 @@ export default function Catalogue({ token, onLogout }) {
             <tbody>
               {loading ? (
                 <tr>
-                  <td style={styles.td} colSpan={4}>Loading…</td>
+                  <td style={styles.td} colSpan={5}>Loading…</td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td style={styles.td} colSpan={4}>No products match your filters.</td>
+                  <td style={styles.td} colSpan={5}>No products match your filters.</td>
                 </tr>
               ) : (
                 items.map((p) => (
-                  <tr key={p.id}>
-                    <td style={styles.td}>{p.category}</td>
-                    <td style={styles.td}>{p.name}</td>
-                    <td style={{ ...styles.td, textAlign: 'right' }}>{formatPrice(p.price)}</td>
-                    <td style={{ ...styles.td, textAlign: 'right' }}>{p.quantity}</td>
-                  </tr>
+                  <Fragment key={p.id}>
+                    <tr
+                      style={canManage ? styles.rowClickable : undefined}
+                      onClick={canManage ? () => setExpandedId(expandedId === p.id ? null : p.id) : undefined}
+                    >
+                      <td style={styles.td}>{p.category}</td>
+                      <td style={styles.td}>{p.name}</td>
+                      <td style={styles.td}>{p.hsn_code || '—'}</td>
+                      <td style={{ ...styles.td, textAlign: 'right' }}>{formatPrice(p.price)}</td>
+                      <td style={{ ...styles.td, textAlign: 'right' }}>{p.quantity}</td>
+                    </tr>
+                    {canManage && expandedId === p.id && (
+                      <tr>
+                        <td colSpan={5} style={{ padding: 0 }}>
+                          <ProductManageRow
+                            token={token}
+                            onLogout={onLogout}
+                            product={p}
+                            onSaved={() => setRefreshKey((k) => k + 1)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))
               )}
             </tbody>
@@ -231,6 +319,52 @@ const styles = {
     padding: '10px 12px',
     borderBottom: '1px solid #f1f5f9',
     color: '#0f172a',
+  },
+  rowClickable: {
+    cursor: 'pointer',
+  },
+  manageRow: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+    gap: 12,
+    alignItems: 'end',
+    padding: '12px 16px',
+    background: '#f8fafc',
+    borderBottom: '1px solid #e2e8f0',
+  },
+  manageLabel: {
+    display: 'block',
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#334155',
+    marginBottom: 4,
+  },
+  manageInput: {
+    width: '100%',
+    padding: '8px 10px',
+    borderRadius: 6,
+    border: '1px solid #cbd5e1',
+    fontSize: 13,
+    background: '#fff',
+  },
+  manageActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+  },
+  smallButton: {
+    padding: '8px 14px',
+    borderRadius: 6,
+    border: 'none',
+    background: '#1e3a8a',
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  inlineError: {
+    fontSize: 12,
+    color: '#b91c1c',
   },
   pagination: {
     display: 'flex',

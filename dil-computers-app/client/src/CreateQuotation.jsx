@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { apiFetch, AuthError } from './api'
-import { formatPrice } from './format'
+import { formatPrice, GST_RATES, computeGstTotals } from './format'
 import { buildDocumentPdf, generateDocumentNumber, todayIso } from './documentPdf'
 import useLineItemBuilder from './useLineItemBuilder'
+import useCompanyInfo from './useCompanyInfo'
 import ProductPicker from './ProductPicker'
 import LineItemsTable from './LineItemsTable'
 import CustomerPicker from './CustomerPicker'
@@ -12,6 +13,7 @@ export default function CreateQuotation({ token, onLogout }) {
   const [quotationDate, setQuotationDate] = useState(todayIso)
   const [customerName, setCustomerName] = useState('')
   const [customerId, setCustomerId] = useState(null)
+  const [gstRate, setGstRate] = useState(18)
 
   const [lineItems, setLineItems] = useState([])
   const [formError, setFormError] = useState('')
@@ -19,6 +21,7 @@ export default function CreateQuotation({ token, onLogout }) {
   const [saving, setSaving] = useState(false)
 
   const builder = useLineItemBuilder({ token, onLogout })
+  const companyInfo = useCompanyInfo()
 
   function handleAddItem() {
     setFormError('')
@@ -58,9 +61,11 @@ export default function CreateQuotation({ token, onLogout }) {
           customerName,
           customerId,
           items: lineItems,
+          gstRate,
         }),
       })
 
+      const totals = computeGstTotals(lineItems, gstRate)
       buildDocumentPdf({
         docLabel: 'Quotation',
         filePrefix: 'Quotation',
@@ -68,6 +73,9 @@ export default function CreateQuotation({ token, onLogout }) {
         date: quotationDate,
         fields: [['Customer', customerName]],
         items: lineItems,
+        companyInfo,
+        gstRate,
+        ...totals,
       })
 
       setSuccessMessage(`Quotation ${quotationNumber.trim()} saved.`)
@@ -90,7 +98,7 @@ export default function CreateQuotation({ token, onLogout }) {
     }
   }
 
-  const grandTotal = lineItems.reduce((sum, item) => sum + item.finalPrice * item.quantity, 0)
+  const { subtotal, gstAmount, grandTotal } = computeGstTotals(lineItems, gstRate)
 
   return (
     <div>
@@ -138,6 +146,14 @@ export default function CreateQuotation({ token, onLogout }) {
             setCustomerId(customer.id)
           }}
         />
+        <div>
+          <label style={styles.label} htmlFor="gstRate">GST rate</label>
+          <select id="gstRate" style={styles.input} value={gstRate} onChange={(e) => setGstRate(Number(e.target.value))}>
+            {GST_RATES.map((r) => (
+              <option key={r} value={r}>{r === 0 ? 'No GST' : `${r}%`}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div style={styles.card}>
@@ -156,7 +172,15 @@ export default function CreateQuotation({ token, onLogout }) {
       {successMessage && <div style={styles.success}>{successMessage}</div>}
 
       <div style={styles.footer}>
-        <span style={styles.grandTotal}>Grand total: {formatPrice(grandTotal)}</span>
+        <div style={styles.totalsBlock}>
+          {gstRate > 0 && (
+            <>
+              <span style={styles.totalsLine}>Subtotal: {formatPrice(subtotal)}</span>
+              <span style={styles.totalsLine}>GST ({gstRate}%): {formatPrice(gstAmount)}</span>
+            </>
+          )}
+          <span style={styles.grandTotal}>Grand total: {formatPrice(grandTotal)}</span>
+        </div>
         <button
           type="button"
           style={styles.createButton}
@@ -252,6 +276,15 @@ const styles = {
     flexWrap: 'wrap',
     gap: 12,
     marginTop: 16,
+  },
+  totalsBlock: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+  },
+  totalsLine: {
+    fontSize: 13,
+    color: '#64748b',
   },
   grandTotal: {
     fontSize: 16,

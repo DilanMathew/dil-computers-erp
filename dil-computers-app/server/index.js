@@ -69,14 +69,27 @@ function validateLineItems(rawItems, { requireProductId = false } = {}) {
       catalPrice,
       finalPrice,
       sameAsCatalogue: Boolean(raw?.sameAsCatalogue),
+      hsnCode: typeof raw?.hsnCode === 'string' && raw.hsnCode.trim() ? raw.hsnCode.trim() : null,
     })
   }
 
   return { ok: true, items }
 }
 
-function computeGrandTotal(items) {
+function computeSubtotal(items) {
   return items.reduce((sum, item) => sum + item.finalPrice * item.quantity, 0)
+}
+
+const GST_RATES = [0, 5, 12, 18, 28]
+
+// Returns { rate, subtotal, gstAmount, grandTotal } from a raw rate value
+// and the line items' pre-tax subtotal. Falls back to 0% for anything not
+// one of the standard GST slabs, rather than trusting an arbitrary number.
+function computeGst(items, rawRate) {
+  const subtotal = computeSubtotal(items)
+  const rate = GST_RATES.includes(Number(rawRate)) ? Number(rawRate) : 0
+  const gstAmount = Math.round(subtotal * (rate / 100) * 100) / 100
+  return { rate, subtotal, gstAmount, grandTotal: subtotal + gstAmount }
 }
 
 function isValidDateString(value) {
@@ -118,6 +131,16 @@ app.post('/api/login', async (req, res) => {
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' })
+})
+
+// Public (no auth) — printed on quotation/invoice PDFs. Not a secret; the
+// same info would be on a printed letterhead.
+app.get('/api/company-info', (req, res) => {
+  res.json({
+    name: process.env.COMPANY_NAME || 'DIL Computers',
+    gstin: process.env.COMPANY_GSTIN || '',
+    address: process.env.COMPANY_ADDRESS || '',
+  })
 })
 
 app.get('/api/me', requireAuth, async (req, res) => {
@@ -486,6 +509,10 @@ app.get('/api/products', requireAuth, async (req, res) => {
       conditions.push(`name ILIKE $${params.length}`)
     }
 
+    if (req.query.lowStock === 'true') {
+      conditions.push('reorder_threshold IS NOT NULL AND quantity <= reorder_threshold')
+    }
+
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
 
     const countResult = await pool.query(
@@ -497,7 +524,7 @@ app.get('/api/products', requireAuth, async (req, res) => {
     params.push(pageSize)
     params.push(offset)
     const itemsResult = await pool.query(
-      `SELECT id, category, name, price, quantity
+      `SELECT id, category, name, price, quantity, hsn_code, reorder_threshold, cost_price
        FROM products
        ${where}
        ORDER BY ${sortColumn} ${sortDir}
@@ -518,9 +545,377 @@ app.get('/api/products', requireAuth, async (req, res) => {
   }
 })
 
+// Admin-only: catalogue management fields, not the product's core data
+// (name/price/quantity/category stay CSV-managed).
+app.patch('/api/products/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid product id' })
+    }
+
+    const sets = []
+    const params = []
+
+    if ('reorderThreshold' in (req.body || {})) {
+      const v = req.body.reorderThreshold
+      if (v === null || v === '') {
+        params.push(null)
+      } else {
+        const n = parseInt(v, 10)
+        if (!Number.isInteger(n) || n < 0) {
+          return res.status(400).json({ message: 'Reorder threshold must be a non-negative whole number' })
+        }
+        params.push(n)
+      }
+      sets.push(`reorder_threshold = $${params.length}`)
+    }
+    if ('hsnCode' in (req.body || {})) {
+      const v = typeof req.body.hsnCode === 'string' && req.body.hsnCode.trim() ? req.body.hsnCode.trim() : null
+      params.push(v)
+      sets.push(`hsn_code = $${params.length}`)
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ message: 'Nothing to update' })
+    }
+
+    params.push(id)
+    const { rows } = await pool.query(
+      `UPDATE products SET ${sets.join(', ')} WHERE id = $${params.length}
+       RETURNING id, category, name, price, quantity, hsn_code, reorder_threshold, cost_price`,
+      params
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Product not found' })
+    }
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'product.update',
+      entityType: 'product',
+      entityId: id,
+      details: { fields: Object.keys(req.body || {}) },
+    })
+
+    res.json({ product: rows[0] })
+  } catch (err) {
+    console.error('PATCH /api/products/:id failed:', err)
+    res.status(500).json({ message: 'Could not update product' })
+  }
+})
+
+// --- Suppliers ---
+
+app.get('/api/suppliers', requireAuth, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
+    const offset = (page - 1) * pageSize
+
+    const params = []
+    let where = ''
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`)
+      where = `WHERE name ILIKE $${params.length} OR phone ILIKE $${params.length} OR email ILIKE $${params.length}`
+    }
+
+    const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM suppliers ${where}`, params)
+    const total = countResult.rows[0].total
+
+    params.push(pageSize)
+    params.push(offset)
+    const itemsResult = await pool.query(
+      `SELECT id, name, phone, email, address, gstin, notes, created_by_username, created_at
+       FROM suppliers
+       ${where}
+       ORDER BY name ASC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    res.json({
+      items: itemsResult.rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
+  } catch (err) {
+    console.error('GET /api/suppliers failed:', err)
+    res.status(500).json({ message: 'Could not load suppliers' })
+  }
+})
+
+app.get('/api/suppliers/:id', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid supplier id' })
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id, name, phone, email, address, gstin, notes, created_by_username, created_at
+       FROM suppliers WHERE id = $1`,
+      [id]
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Supplier not found' })
+    }
+
+    const purchaseOrders = await pool.query(
+      `SELECT id, po_number, po_date, grand_total, created_at
+       FROM purchase_orders WHERE supplier_id = $1 ORDER BY created_at DESC`,
+      [id]
+    )
+
+    res.json({ supplier: rows[0], purchaseOrders: purchaseOrders.rows })
+  } catch (err) {
+    console.error('GET /api/suppliers/:id failed:', err)
+    res.status(500).json({ message: 'Could not load supplier' })
+  }
+})
+
+app.post('/api/suppliers', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+  try {
+    const { name, phone, email, address, gstin, notes } = req.body || {}
+    const trimmedName = typeof name === 'string' ? name.trim() : ''
+    if (!trimmedName) {
+      return res.status(400).json({ message: 'Supplier name is required' })
+    }
+
+    const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+
+    const { rows } = await pool.query(
+      `INSERT INTO suppliers (name, phone, email, address, gstin, notes, created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, name, phone, email, address, gstin, notes, created_by_username, created_at`,
+      [trimmedName, clean(phone), clean(email), clean(address), clean(gstin), clean(notes), req.user.id, req.user.username]
+    )
+    const supplier = rows[0]
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'supplier.create',
+      entityType: 'supplier',
+      entityId: supplier.id,
+      details: { name: supplier.name },
+    })
+
+    res.status(201).json({ supplier })
+  } catch (err) {
+    console.error('POST /api/suppliers failed:', err)
+    res.status(500).json({ message: 'Could not create supplier' })
+  }
+})
+
+app.patch('/api/suppliers/:id', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid supplier id' })
+    }
+
+    const sets = []
+    const params = []
+    const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+
+    if (typeof req.body?.name === 'string') {
+      if (!req.body.name.trim()) {
+        return res.status(400).json({ message: 'Supplier name cannot be empty' })
+      }
+      params.push(req.body.name.trim())
+      sets.push(`name = $${params.length}`)
+    }
+    for (const field of ['phone', 'email', 'address', 'gstin', 'notes']) {
+      if (typeof req.body?.[field] === 'string') {
+        params.push(clean(req.body[field]))
+        sets.push(`${field} = $${params.length}`)
+      }
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ message: 'Nothing to update' })
+    }
+
+    params.push(id)
+    const { rows } = await pool.query(
+      `UPDATE suppliers SET ${sets.join(', ')} WHERE id = $${params.length}
+       RETURNING id, name, phone, email, address, gstin, notes, created_by_username, created_at`,
+      params
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Supplier not found' })
+    }
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'supplier.update',
+      entityType: 'supplier',
+      entityId: id,
+      details: { fields: Object.keys(req.body || {}) },
+    })
+
+    res.json({ supplier: rows[0] })
+  } catch (err) {
+    console.error('PATCH /api/suppliers/:id failed:', err)
+    res.status(500).json({ message: 'Could not update supplier' })
+  }
+})
+
+// --- Purchase orders (receiving stock) ---
+
+function validatePurchaseItems(rawItems) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    return { ok: false, message: 'At least one line item is required' }
+  }
+
+  const items = []
+  for (const raw of rawItems) {
+    const category = typeof raw?.category === 'string' ? raw.category.trim() : ''
+    const name = typeof raw?.name === 'string' ? raw.name.trim() : ''
+    const quantity = Number(raw?.quantity)
+    const costPrice = Number(raw?.costPrice)
+    const productId = Number.isInteger(raw?.productId) ? raw.productId : parseInt(raw?.productId, 10)
+
+    if (!category || !name) {
+      return { ok: false, message: 'Each line item needs a category and product name' }
+    }
+    if (!Number.isInteger(productId) || productId <= 0) {
+      return { ok: false, message: `Missing catalogue reference for "${name}" — re-add it from the picker.` }
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return { ok: false, message: `Invalid quantity for "${name}"` }
+    }
+    if (!Number.isFinite(costPrice) || costPrice < 0) {
+      return { ok: false, message: `Invalid cost price for "${name}"` }
+    }
+
+    items.push({ productId, category, name, quantity, costPrice })
+  }
+
+  return { ok: true, items }
+}
+
+app.post('/api/purchase-orders', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+  const client = await pool.connect()
+  try {
+    const { poNumber, poDate, supplierName, supplierId, items: rawItems } = req.body || {}
+
+    const number = typeof poNumber === 'string' ? poNumber.trim() : ''
+    if (!number) {
+      return res.status(400).json({ message: 'PO number is required' })
+    }
+    if (!isValidDateString(poDate)) {
+      return res.status(400).json({ message: 'A valid PO date (YYYY-MM-DD) is required' })
+    }
+
+    const validation = validatePurchaseItems(rawItems)
+    if (!validation.ok) {
+      return res.status(400).json({ message: validation.message })
+    }
+
+    let supId = null
+    if (supplierId != null) {
+      supId = parseInt(supplierId, 10)
+      if (!Number.isInteger(supId)) {
+        return res.status(400).json({ message: 'Invalid supplier reference' })
+      }
+    }
+
+    const grandTotal = validation.items.reduce((sum, item) => sum + item.costPrice * item.quantity, 0)
+    const supplier = typeof supplierName === 'string' && supplierName.trim() ? supplierName.trim() : null
+
+    await client.query('BEGIN')
+
+    // Receiving a PO increases stock immediately and records the price
+    // paid as each product's latest cost.
+    for (const item of validation.items) {
+      const { rowCount } = await client.query(
+        `UPDATE products SET quantity = quantity + $1, cost_price = $2 WHERE id = $3`,
+        [item.quantity, item.costPrice, item.productId]
+      )
+      if (rowCount === 0) {
+        await client.query('ROLLBACK')
+        return res.status(400).json({ message: `Product "${item.name}" no longer exists in the catalogue.` })
+      }
+    }
+
+    const { rows } = await client.query(
+      `INSERT INTO purchase_orders
+         (po_number, po_date, supplier_id, supplier_name, items, grand_total, created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, po_number, po_date, supplier_id, supplier_name, items, grand_total, created_by_username, created_at`,
+      [number, poDate, supId, supplier, JSON.stringify(validation.items), grandTotal, req.user.id, req.user.username]
+    )
+    const po = rows[0]
+
+    await client.query('COMMIT')
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'purchase_order.create',
+      entityType: 'purchase_order',
+      entityId: po.id,
+      details: { poNumber: number, grandTotal, productIds: validation.items.map((i) => i.productId) },
+    })
+
+    res.status(201).json({ purchaseOrder: po })
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (err.code === '23503') {
+      return res.status(400).json({ message: 'That supplier no longer exists' })
+    }
+    console.error('POST /api/purchase-orders failed:', err)
+    res.status(500).json({ message: 'Could not save purchase order' })
+  } finally {
+    client.release()
+  }
+})
+
+app.get('/api/purchase-orders', requireAuth, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
+    const offset = (page - 1) * pageSize
+
+    const params = []
+    let where = ''
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`)
+      where = `WHERE po_number ILIKE $${params.length} OR supplier_name ILIKE $${params.length}`
+    }
+
+    const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM purchase_orders ${where}`, params)
+    const total = countResult.rows[0].total
+
+    params.push(pageSize)
+    params.push(offset)
+    const itemsResult = await pool.query(
+      `SELECT id, po_number, po_date, supplier_id, supplier_name, items, grand_total, created_by_username, created_at
+       FROM purchase_orders
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    res.json({
+      items: itemsResult.rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
+  } catch (err) {
+    console.error('GET /api/purchase-orders failed:', err)
+    res.status(500).json({ message: 'Could not load purchase orders' })
+  }
+})
+
 app.post('/api/quotations', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
   try {
-    const { quotationNumber, quotationDate, customerName, customerId, items: rawItems } = req.body || {}
+    const { quotationNumber, quotationDate, customerName, customerId, items: rawItems, gstRate } = req.body || {}
 
     const number = typeof quotationNumber === 'string' ? quotationNumber.trim() : ''
     if (!number) {
@@ -543,17 +938,17 @@ app.post('/api/quotations', requireAuth, requireRole('admin', 'sales'), async (r
       }
     }
 
-    const grandTotal = computeGrandTotal(validation.items)
+    const { rate, subtotal, gstAmount, grandTotal } = computeGst(validation.items, gstRate)
     const customer = typeof customerName === 'string' && customerName.trim() ? customerName.trim() : null
 
     const { rows } = await pool.query(
       `INSERT INTO quotations
-         (quotation_number, quotation_date, customer_name, customer_id, items, grand_total,
-          created_by_user_id, created_by_username)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id, quotation_number, quotation_date, customer_name, customer_id, items, grand_total,
-                 created_by_username, created_at`,
-      [number, quotationDate, customer, custId, JSON.stringify(validation.items), grandTotal, req.user.id, req.user.username]
+         (quotation_number, quotation_date, customer_name, customer_id, items, subtotal, gst_rate, gst_amount,
+          grand_total, created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id, quotation_number, quotation_date, customer_name, customer_id, items, subtotal, gst_rate,
+                 gst_amount, grand_total, created_by_username, created_at`,
+      [number, quotationDate, customer, custId, JSON.stringify(validation.items), subtotal, rate, gstAmount, grandTotal, req.user.id, req.user.username]
     )
     const quotation = rows[0]
 
@@ -597,8 +992,8 @@ app.get('/api/quotations', requireAuth, async (req, res) => {
     params.push(pageSize)
     params.push(offset)
     const itemsResult = await pool.query(
-      `SELECT id, quotation_number, quotation_date, customer_name, items, grand_total,
-              created_by_username, created_at
+      `SELECT id, quotation_number, quotation_date, customer_name, items, subtotal, gst_rate, gst_amount,
+              grand_total, created_by_username, created_at
        FROM quotations
        ${where}
        ORDER BY created_at DESC
@@ -633,6 +1028,7 @@ app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req
       quotationNumber,
       items: rawItems,
       amountReceived,
+      gstRate,
     } = req.body || {}
 
     const number = typeof invoiceNumber === 'string' ? invoiceNumber.trim() : ''
@@ -660,7 +1056,7 @@ app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req
       }
     }
 
-    const grandTotal = computeGrandTotal(validation.items)
+    const { rate, subtotal, gstAmount, grandTotal } = computeGst(validation.items, gstRate)
 
     // How much is being paid right now — defaults to the full total (the
     // common "paid in full at sale" case) if the field is omitted, so
@@ -710,14 +1106,15 @@ app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req
     const { rows } = await client.query(
       `INSERT INTO invoices
          (invoice_number, invoice_date, customer_name, customer_id, customer_phone, customer_address,
-          payment_method, quotation_number, items, grand_total,
+          payment_method, quotation_number, items, subtotal, gst_rate, gst_amount, grand_total,
           created_by_user_id, created_by_username)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING id, invoice_number, invoice_date, customer_name, customer_phone, customer_address,
-                 payment_method, quotation_number, items, grand_total, created_by_username, created_at`,
+                 payment_method, quotation_number, items, subtotal, gst_rate, gst_amount, grand_total,
+                 created_by_username, created_at`,
       [
         number, invoiceDate, customer, custId, phone, address, payment, refQuotation,
-        JSON.stringify(validation.items), grandTotal, req.user.id, req.user.username,
+        JSON.stringify(validation.items), subtotal, rate, gstAmount, grandTotal, req.user.id, req.user.username,
       ]
     )
     const invoice = rows[0]
@@ -849,7 +1246,8 @@ app.get('/api/invoices', requireAuth, async (req, res) => {
     params.push(offset)
     const itemsResult = await pool.query(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.customer_name, i.customer_id, i.customer_phone,
-              i.customer_address, i.payment_method, i.quotation_number, i.items, i.grand_total,
+              i.customer_address, i.payment_method, i.quotation_number, i.items,
+              i.subtotal, i.gst_rate, i.gst_amount, i.grand_total,
               i.created_by_username, i.created_at,
               COALESCE(pay.paid, 0) AS amount_paid,
               i.grand_total - COALESCE(pay.paid, 0) AS balance_due,

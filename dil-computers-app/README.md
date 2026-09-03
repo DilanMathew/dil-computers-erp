@@ -8,11 +8,13 @@ logged in — a dashboard with sections scoped to your role:
   for a product by name, and set a quantity; the catalogue price
   auto-populates. Final price starts empty — tick "Same as catalogue price"
   to use the catalogue price as-is, or leave it unticked and type a
-  discounted price. Add as many products as needed, then **Create
-  Quotation (PDF)** saves the quotation and downloads a filled-in PDF
-  (quotation #, date, customer, line items, and grand total) straight to
-  your computer. Quotations do **not** affect catalogue stock — they're
-  estimates, not sales.
+  discounted price. Pick a **GST rate** (0/5/12/18/28%, standard Indian
+  slabs) — the subtotal/GST/grand total breakdown shows live and prints on
+  the PDF alongside each line item's HSN code (from the catalogue, if
+  set) and the company's own name/GSTIN/address. Add as many products as
+  needed, then **Create Quotation (PDF)** saves the quotation and
+  downloads the PDF straight to your computer. Quotations do **not**
+  affect catalogue stock — they're estimates, not sales.
 - **Quotations** *(all roles)* — searchable, paginated list of every saved
   quotation, with an expandable row showing its line items and who created it.
 - **Create Invoice** *(admin, sales)* — the same category/product/quantity/
@@ -34,9 +36,25 @@ logged in — a dashboard with sections scoped to your role:
   paginated list of saved customer records (name, phone, email, address,
   notes). An expandable row shows and edits those details plus every
   quotation and invoice linked to that customer.
-- **Product Catalogue** *(all roles)* — the original searchable, paginated
-  view of the full product catalogue; quantities reflect stock reduced by
-  invoices.
+- **Create Purchase Order** *(admin, sales)* — receive stock from a
+  supplier: category/product/quantity/cost-price picker, same shape as the
+  sales pickers but for buying. Submitting a PO **increases catalogue
+  stock immediately** (there's no separate "ordered, not yet arrived"
+  state) and updates each product's last-known cost price.
+- **Purchase Orders** *(all roles)* — searchable, paginated list of every
+  received PO, with an expandable row showing its line items.
+- **Suppliers** *(all roles view; admin/sales can add/edit)* — same shape
+  as Customers, including a GSTIN field and an expandable row showing that
+  supplier's purchase order history.
+- **Low Stock** *(all roles)* — every product at or below its reorder
+  threshold, sorted by quantity. Set a threshold per product from the
+  Product Catalogue (admin only).
+- **Product Catalogue** *(all roles; admin can manage)* — the original
+  searchable, paginated view of the full product catalogue, now also
+  showing each product's HSN code. Quantities reflect stock reduced by
+  invoices and increased by purchase orders. Admins can click a row to set
+  its HSN code and reorder threshold (its last cost price is shown
+  read-only, set automatically from purchase orders).
 - **Users** *(admin only)* — create accounts, assign roles (`admin` /
   `sales` / `accountant`), deactivate/reactivate accounts, reset passwords.
   An admin can't deactivate or demote their own account (so there's always
@@ -75,6 +93,7 @@ during that first bootstrap.) From then on, manage accounts from the
 | `AUTH_SECRET` | Recommended | Secret used to sign login tokens. Falls back to an insecure dev default if unset — set a real value in production. |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | No | Override the hardcoded login. |
 | `PGSSL` | No | Set to `disable` to turn off SSL for a local Postgres. Defaults to Railway-friendly SSL (`rejectUnauthorized: false`). |
+| `COMPANY_NAME` / `COMPANY_GSTIN` / `COMPANY_ADDRESS` | No | Printed on every quotation/invoice PDF header. `COMPANY_NAME` defaults to "DIL Computers"; the other two are blank (omitted from the PDF) if unset. |
 
 ## Local development
 
@@ -134,8 +153,10 @@ the seed step on every deploy.
 
 **`products`** — seeded from `server/data/product_catalogue.csv` (columns:
 `category`, `Product`, `price`, `quantity`) — 9,500 rows across 19
-categories. `quantity` is live stock: it only decreases, when an invoice is
-created.
+categories. `quantity` is live stock: invoices decrease it, purchase
+orders increase it. `hsn_code` and `reorder_threshold` are set from the
+Product Catalogue (admin only); `cost_price` is set automatically from
+the most recent purchase order that received the product.
 
 | column | type |
 |---|---|
@@ -144,18 +165,28 @@ created.
 | name | text |
 | price | numeric(10,2) |
 | quantity | integer |
+| hsn_code | text, nullable |
+| reorder_threshold | integer, nullable |
+| cost_price | numeric(10,2), nullable |
 | created_at | timestamptz |
 
 **`quotations`** and **`invoices`** — written by `POST /api/quotations`
 and `POST /api/invoices` respectively. Each stores its line items as a
 JSONB array (category, product name, quantity, catalogue price, final
-price, and whether the final price matched the catalogue). `invoices` also
+price, HSN code, and whether the final price matched the catalogue), plus
+`subtotal`/`gst_rate`/`gst_amount` alongside `grand_total` (now the
+tax-inclusive final total — `subtotal + gst_amount`). `invoices` also
 carries customer phone/address, payment method, and an optional
 `quotation_number` reference (free text, not a foreign key — a quotation
 can be edited or reused without breaking old invoices that cite it). Both
 carry `created_by_user_id`/`created_by_username` and an optional
 `customer_id` — linking a saved customer is optional either way, so a
 walk-in sale with no saved record works exactly as before.
+
+**`suppliers`** and **`purchase_orders`** — the buying-side mirror of
+`customers`/`invoices`. A PO's `items` JSONB carries category/product
+name/quantity/cost price per line; creating one increases the referenced
+products' `quantity` and sets their `cost_price` in the same transaction.
 
 **`users`** — accounts, bcrypt-hashed passwords, and a `role` (`admin` /
 `sales` / `accountant`). A bootstrap admin is inserted automatically the
@@ -176,7 +207,8 @@ can't drift out of sync with the payments actually on record.
 
 **`audit_log`** — one row per tracked action (`user.create`, `user.update`,
 `quotation.create`, `invoice.create`, `customer.create`, `customer.update`,
-`payment.record`), who did it, and a small JSON detail snapshot. `user_id`
-is nullable (`ON DELETE SET NULL`) so deleting an account, if that's ever
-added, wouldn't take its history with it — `username` is kept alongside as
-a permanent snapshot either way.
+`payment.record`, `product.update`, `supplier.create`, `supplier.update`,
+`purchase_order.create`), who did it, and a small JSON detail snapshot.
+`user_id` is nullable (`ON DELETE SET NULL`) so deleting an account, if
+that's ever added, wouldn't take its history with it — `username` is kept
+alongside as a permanent snapshot either way.

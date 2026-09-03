@@ -7,16 +7,24 @@ import Invoices from './Invoices'
 import Users from './Users'
 import AuditLog from './AuditLog'
 import Customers from './Customers'
+import CreatePurchaseOrder from './CreatePurchaseOrder'
+import PurchaseOrders from './PurchaseOrders'
+import Suppliers from './Suppliers'
+import LowStock from './LowStock'
 
-// Which roles see each tab. 'sales' can create and view sales documents;
-// 'accountant' can view them but not create (read-only); 'admin' sees
-// everything plus user management and the audit log.
+// Which roles see each tab. 'sales' can create and view sales/purchasing
+// documents; 'accountant' can view them but not create (read-only);
+// 'admin' sees everything plus user management and the audit log.
 const TABS = [
   { id: 'quotation', label: 'Create Quotation', roles: ['admin', 'sales'], Component: CreateQuotation },
   { id: 'quotations', label: 'Quotations', roles: ['admin', 'sales', 'accountant'], Component: Quotations },
   { id: 'invoice', label: 'Create Invoice', roles: ['admin', 'sales'], Component: CreateInvoice },
   { id: 'invoices', label: 'Invoices', roles: ['admin', 'sales', 'accountant'], Component: Invoices },
   { id: 'customers', label: 'Customers', roles: ['admin', 'sales', 'accountant'], Component: Customers },
+  { id: 'purchaseOrder', label: 'Create Purchase Order', roles: ['admin', 'sales'], Component: CreatePurchaseOrder },
+  { id: 'purchaseOrders', label: 'Purchase Orders', roles: ['admin', 'sales', 'accountant'], Component: PurchaseOrders },
+  { id: 'suppliers', label: 'Suppliers', roles: ['admin', 'sales', 'accountant'], Component: Suppliers },
+  { id: 'lowStock', label: 'Low Stock', roles: ['admin', 'sales', 'accountant'], Component: LowStock },
   { id: 'catalogue', label: 'Product Catalogue', roles: ['admin', 'sales', 'accountant'], Component: Catalogue },
   { id: 'users', label: 'Users', roles: ['admin'], Component: Users },
   { id: 'audit', label: 'Audit Log', roles: ['admin'], Component: AuditLog },
