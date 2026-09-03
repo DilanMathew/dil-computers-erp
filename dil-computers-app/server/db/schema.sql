@@ -186,3 +186,69 @@ ALTER TABLE invoices ALTER COLUMN subtotal SET NOT NULL;
 
 -- The buyer's own GST number, for GST-registered customers/suppliers.
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS gstin TEXT;
+
+-- Per-product warranty (months from date of sale). Purely informational —
+-- shown on the sale, not tracked with alerts in this phase.
+ALTER TABLE products ADD COLUMN IF NOT EXISTS warranty_months INTEGER;
+
+-- Annual maintenance contracts. A contract's status (active/expired) is
+-- derived from end_date vs today rather than stored, same pattern as
+-- invoice payment status — "cancelled" is the one state dates alone can't
+-- express, so that's the only status actually stored.
+CREATE TABLE IF NOT EXISTS amc_contracts (
+  id SERIAL PRIMARY KEY,
+  contract_number TEXT NOT NULL,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  start_date DATE NOT NULL,
+  end_date DATE NOT NULL,
+  amount NUMERIC(12, 2) NOT NULL,
+  covered_devices TEXT,
+  notes TEXT,
+  cancelled BOOLEAN NOT NULL DEFAULT false,
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_username TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS amc_contracts_number_idx ON amc_contracts (contract_number);
+CREATE INDEX IF NOT EXISTS amc_contracts_customer_idx ON amc_contracts (customer_id);
+
+-- Repair/service tickets. status is one of 'received' | 'diagnosing' |
+-- 'waiting_for_parts' | 'in_repair' | 'ready_for_pickup' | 'completed' |
+-- 'cancelled'. invoice_number is a free-text reference (same pattern as
+-- invoices.quotation_number) — billing for a repair happens as a normal
+-- invoice that cites the ticket, rather than the ticket carrying its own
+-- line items. warranty_days is set when the repair is completed (the
+-- shop's own warranty on the work, separate from any product warranty).
+CREATE TABLE IF NOT EXISTS repair_tickets (
+  id SERIAL PRIMARY KEY,
+  ticket_number TEXT NOT NULL,
+  customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  device_description TEXT NOT NULL,
+  serial_number TEXT,
+  reported_issue TEXT NOT NULL,
+  diagnosis TEXT,
+  status TEXT NOT NULL DEFAULT 'received',
+  estimated_cost NUMERIC(12, 2),
+  final_cost NUMERIC(12, 2),
+  invoice_number TEXT,
+  amc_contract_id INTEGER REFERENCES amc_contracts(id) ON DELETE SET NULL,
+  warranty_days INTEGER,
+  received_date DATE NOT NULL,
+  completed_date DATE,
+  assigned_to_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  assigned_to_username TEXT,
+  notes TEXT,
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_username TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS repair_tickets_number_idx ON repair_tickets (ticket_number);
+CREATE INDEX IF NOT EXISTS repair_tickets_customer_idx ON repair_tickets (customer_id);
+CREATE INDEX IF NOT EXISTS repair_tickets_status_idx ON repair_tickets (status);
+CREATE INDEX IF NOT EXISTS repair_tickets_created_at_idx ON repair_tickets (created_at DESC);
+
+-- Optional reference from an invoice back to the repair ticket it billed
+-- for — same free-text-reference pattern as invoices.quotation_number.
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS ticket_number TEXT;

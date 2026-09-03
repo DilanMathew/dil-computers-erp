@@ -26,6 +26,10 @@ export default function CreateInvoice({ token, onLogout }) {
   const [quotationSuggestions, setQuotationSuggestions] = useState([])
   const [showQuotationSuggestions, setShowQuotationSuggestions] = useState(false)
 
+  const [ticketQuery, setTicketQuery] = useState('')
+  const [ticketSuggestions, setTicketSuggestions] = useState([])
+  const [showTicketSuggestions, setShowTicketSuggestions] = useState(false)
+
   const [lineItems, setLineItems] = useState([])
   const [formError, setFormError] = useState('')
   const [successMessage, setSuccessMessage] = useState('')
@@ -61,6 +65,33 @@ export default function CreateInvoice({ token, onLogout }) {
       clearTimeout(id)
     }
   }, [token, quotationQuery, onLogout])
+
+  // Same lookup pattern for referencing a repair ticket this invoice is
+  // billing for (e.g. parts + labor once a repair is complete).
+  useEffect(() => {
+    if (!ticketQuery) {
+      setTicketSuggestions([])
+      return
+    }
+
+    let cancelled = false
+    const id = setTimeout(() => {
+      apiFetch(`/api/repair-tickets?q=${encodeURIComponent(ticketQuery)}&pageSize=6`, token)
+        .then((data) => {
+          if (cancelled) return
+          setTicketSuggestions(data.items || [])
+        })
+        .catch((err) => {
+          if (cancelled) return
+          if (err instanceof AuthError) onLogout()
+        })
+    }, 250)
+
+    return () => {
+      cancelled = true
+      clearTimeout(id)
+    }
+  }, [token, ticketQuery, onLogout])
 
   function handleAddItem() {
     setFormError('')
@@ -120,6 +151,7 @@ export default function CreateInvoice({ token, onLogout }) {
           customerAddress,
           paymentMethod,
           quotationNumber: quotationQuery,
+          ticketNumber: ticketQuery,
           items: lineItems,
           amountReceived: received,
           gstRate,
@@ -138,6 +170,7 @@ export default function CreateInvoice({ token, onLogout }) {
           ['Address', customerAddress],
           ['Payment Method', paymentMethod],
           ['Quotation Ref', quotationQuery],
+          ['Repair Ticket Ref', ticketQuery],
           ...(balanceDue > 0.01
             ? [['Amount Paid', formatPrice(received)], ['Balance Due', formatPrice(balanceDue)]]
             : []),
@@ -168,6 +201,7 @@ export default function CreateInvoice({ token, onLogout }) {
       setFullyPaid(true)
       setAmountReceived('')
       setQuotationQuery('')
+      setTicketQuery('')
       setInvoiceNumber(generateDocumentNumber('INV'))
       setInvoiceDate(todayIso())
     } catch (err) {
@@ -300,6 +334,39 @@ export default function CreateInvoice({ token, onLogout }) {
                 >
                   <span>{q.quotation_number} — {q.customer_name || 'Walk-in'}</span>
                   <span style={styles.suggestionPrice}>{formatPrice(q.grand_total)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{ position: 'relative' }}>
+          <label style={styles.label} htmlFor="ticketRef">Reference repair ticket # (optional)</label>
+          <input
+            id="ticketRef"
+            style={styles.input}
+            type="text"
+            placeholder="Search by ticket # or customer…"
+            value={ticketQuery}
+            onChange={(e) => {
+              setTicketQuery(e.target.value)
+              setShowTicketSuggestions(true)
+            }}
+            onFocus={() => setShowTicketSuggestions(true)}
+            onBlur={() => setTimeout(() => setShowTicketSuggestions(false), 150)}
+          />
+          {showTicketSuggestions && ticketQuery && ticketSuggestions.length > 0 && (
+            <div style={styles.suggestions}>
+              {ticketSuggestions.map((t) => (
+                <div
+                  key={t.id}
+                  style={styles.suggestionItem}
+                  onMouseDown={() => {
+                    setTicketQuery(t.ticket_number)
+                    setShowTicketSuggestions(false)
+                  }}
+                >
+                  <span>{t.ticket_number} — {t.customer_name || '—'}</span>
+                  <span style={styles.suggestionPrice}>{t.device_description}</span>
                 </div>
               ))}
             </div>

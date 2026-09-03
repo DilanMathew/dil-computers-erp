@@ -19,12 +19,13 @@ logged in — a dashboard with sections scoped to your role:
   quotation, with an expandable row showing its line items and who created it.
 - **Create Invoice** *(admin, sales)* — the same category/product/quantity/
   price picker, plus a customer (searched from saved customers or typed
-  fresh as a walk-in), phone, address, payment method, and an optional
-  reference to an existing quotation number (autocomplete). Untick "Paid
-  in full now" to record a partial payment or a credit sale (0 received)
-  instead. **Create Invoice (PDF)** saves the invoice, **reduces catalogue
-  stock** by the quantity of each product sold, and downloads a PDF
-  invoice. Stock is checked and decremented atomically — an invoice is
+  fresh as a walk-in), phone, address, payment method, and optional
+  references to an existing quotation number and/or repair ticket number
+  (both autocomplete) — the latter for billing a completed repair. Untick
+  "Paid in full now" to record a partial payment or a credit sale (0
+  received) instead. **Create Invoice (PDF)** saves the invoice, **reduces
+  catalogue stock** by the quantity of each product sold, and downloads a
+  PDF invoice. Stock is checked and decremented atomically — an invoice is
   refused (no partial deduction) if any line item would oversell what's left.
 - **Invoices** *(all roles view; admin/sales can record payments)* —
   searchable, paginated list of every saved invoice, filterable by payment
@@ -51,16 +52,42 @@ logged in — a dashboard with sections scoped to your role:
   Product Catalogue (admin only).
 - **Product Catalogue** *(all roles; admin can manage)* — the original
   searchable, paginated view of the full product catalogue, now also
-  showing each product's HSN code. Quantities reflect stock reduced by
-  invoices and increased by purchase orders. Admins can click a row to set
-  its HSN code and reorder threshold (its last cost price is shown
-  read-only, set automatically from purchase orders).
+  showing each product's HSN code and warranty period. Quantities reflect
+  stock reduced by invoices and increased by purchase orders. Admins can
+  click a row to set its HSN code, reorder threshold, and warranty (in
+  months — carried onto any quotation/invoice line item for that product,
+  purely informational); its last cost price is shown read-only, set
+  automatically from purchase orders.
+- **Create Repair Ticket** *(admin, sales)* — log a device dropped off for
+  repair: pick a saved customer, describe the device and the reported
+  issue, and optionally note a serial number, an estimated cost, and
+  whether it's covered by an existing AMC contract (autocomplete by
+  contract # or customer). Billing for a repair happens as a normal
+  invoice that references the ticket — a ticket doesn't carry its own line
+  items.
+- **Repair Tickets** *(all roles view; admin/sales can update)* —
+  searchable, paginated list filterable by status. An expandable row shows
+  the full ticket and, for admin/sales, an editable workflow: status
+  (received → diagnosing → waiting for parts → in repair → ready for
+  pickup → completed/cancelled), diagnosis notes, final cost, a billing
+  invoice reference, the shop's own warranty on the repair (in days),
+  completed date, assigned technician, and free-form notes.
+- **Create AMC Contract** *(admin, sales)* — set up an annual maintenance
+  contract for a customer: contract number, start/end date, amount, and
+  optionally which devices it covers and any notes.
+- **AMC Contracts** *(all roles view; admin/sales can update)* —
+  searchable, paginated list with a derived status badge (active / expired
+  / cancelled — computed from the end date vs today, not stored, so it
+  can't drift). An expandable row shows contract details, every repair
+  ticket linked to it, and (admin/sales) editing to extend the end date,
+  adjust the amount, or cancel the contract.
 - **Users** *(admin only)* — create accounts, assign roles (`admin` /
   `sales` / `accountant`), deactivate/reactivate accounts, reset passwords.
   An admin can't deactivate or demote their own account (so there's always
   at least one working admin).
 - **Audit Log** *(admin only)* — who created which quotation/invoice/
-  customer/user/payment and when, most recent first.
+  customer/user/payment/repair ticket/AMC contract and when, most recent
+  first.
 
 ### Roles
 
@@ -154,9 +181,10 @@ the seed step on every deploy.
 **`products`** — seeded from `server/data/product_catalogue.csv` (columns:
 `category`, `Product`, `price`, `quantity`) — 9,500 rows across 19
 categories. `quantity` is live stock: invoices decrease it, purchase
-orders increase it. `hsn_code` and `reorder_threshold` are set from the
-Product Catalogue (admin only); `cost_price` is set automatically from
-the most recent purchase order that received the product.
+orders increase it. `hsn_code`, `reorder_threshold`, and
+`warranty_months` are set from the Product Catalogue (admin only);
+`cost_price` is set automatically from the most recent purchase order
+that received the product.
 
 | column | type |
 |---|---|
@@ -168,20 +196,40 @@ the most recent purchase order that received the product.
 | hsn_code | text, nullable |
 | reorder_threshold | integer, nullable |
 | cost_price | numeric(10,2), nullable |
+| warranty_months | integer, nullable |
 | created_at | timestamptz |
 
 **`quotations`** and **`invoices`** — written by `POST /api/quotations`
 and `POST /api/invoices` respectively. Each stores its line items as a
 JSONB array (category, product name, quantity, catalogue price, final
-price, HSN code, and whether the final price matched the catalogue), plus
-`subtotal`/`gst_rate`/`gst_amount` alongside `grand_total` (now the
-tax-inclusive final total — `subtotal + gst_amount`). `invoices` also
-carries customer phone/address, payment method, and an optional
-`quotation_number` reference (free text, not a foreign key — a quotation
-can be edited or reused without breaking old invoices that cite it). Both
-carry `created_by_user_id`/`created_by_username` and an optional
-`customer_id` — linking a saved customer is optional either way, so a
-walk-in sale with no saved record works exactly as before.
+price, HSN code, warranty months, and whether the final price matched the
+catalogue), plus `subtotal`/`gst_rate`/`gst_amount` alongside
+`grand_total` (now the tax-inclusive final total — `subtotal +
+gst_amount`). `invoices` also carries customer phone/address, payment
+method, and optional `quotation_number`/`ticket_number` references (free
+text, not foreign keys — a quotation or repair ticket can be edited or
+reused without breaking old invoices that cite it). Both carry
+`created_by_user_id`/`created_by_username` and an optional `customer_id`
+— linking a saved customer is optional either way, so a walk-in sale with
+no saved record works exactly as before.
+
+**`amc_contracts`** — annual maintenance contracts, written by
+`POST /api/amc-contracts`. Links to a saved `customer_id` (required — no
+walk-in AMC contracts). Its status (`active` / `expired`) is always
+derived from `end_date` vs `CURRENT_DATE`, same pattern as invoice payment
+status — `cancelled` is the one state dates alone can't express, so
+that's the only status actually stored as a boolean.
+
+**`repair_tickets`** — service tickets for devices dropped off for
+repair, written by `POST /api/repair-tickets`. Links to a saved
+`customer_id` (required) and, optionally, an `amc_contract_id` if the
+repair is covered under a contract. `status` moves through `received` →
+`diagnosing` → `waiting_for_parts` → `in_repair` → `ready_for_pickup` →
+`completed`/`cancelled`. `invoice_number` is a free-text reference (same
+pattern as `invoices.quotation_number`) set once the repair is billed —
+a ticket doesn't carry its own line items. `warranty_days` is the shop's
+own warranty on the completed repair work, separate from any product
+warranty.
 
 **`suppliers`** and **`purchase_orders`** — the buying-side mirror of
 `customers`/`invoices`. A PO's `items` JSONB carries category/product
@@ -208,7 +256,8 @@ can't drift out of sync with the payments actually on record.
 **`audit_log`** — one row per tracked action (`user.create`, `user.update`,
 `quotation.create`, `invoice.create`, `customer.create`, `customer.update`,
 `payment.record`, `product.update`, `supplier.create`, `supplier.update`,
-`purchase_order.create`), who did it, and a small JSON detail snapshot.
-`user_id` is nullable (`ON DELETE SET NULL`) so deleting an account, if
-that's ever added, wouldn't take its history with it — `username` is kept
-alongside as a permanent snapshot either way.
+`purchase_order.create`, `amc_contract.create`, `amc_contract.update`,
+`repair_ticket.create`, `repair_ticket.update`), who did it, and a small
+JSON detail snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so
+deleting an account, if that's ever added, wouldn't take its history with
+it — `username` is kept alongside as a permanent snapshot either way.

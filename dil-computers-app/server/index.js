@@ -524,7 +524,7 @@ app.get('/api/products', requireAuth, async (req, res) => {
     params.push(pageSize)
     params.push(offset)
     const itemsResult = await pool.query(
-      `SELECT id, category, name, price, quantity, hsn_code, reorder_threshold, cost_price
+      `SELECT id, category, name, price, quantity, hsn_code, reorder_threshold, cost_price, warranty_months
        FROM products
        ${where}
        ORDER BY ${sortColumn} ${sortDir}
@@ -575,6 +575,19 @@ app.patch('/api/products/:id', requireAuth, requireRole('admin'), async (req, re
       params.push(v)
       sets.push(`hsn_code = $${params.length}`)
     }
+    if ('warrantyMonths' in (req.body || {})) {
+      const v = req.body.warrantyMonths
+      if (v === null || v === '') {
+        params.push(null)
+      } else {
+        const n = parseInt(v, 10)
+        if (!Number.isInteger(n) || n < 0) {
+          return res.status(400).json({ message: 'Warranty months must be a non-negative whole number' })
+        }
+        params.push(n)
+      }
+      sets.push(`warranty_months = $${params.length}`)
+    }
 
     if (sets.length === 0) {
       return res.status(400).json({ message: 'Nothing to update' })
@@ -583,7 +596,7 @@ app.patch('/api/products/:id', requireAuth, requireRole('admin'), async (req, re
     params.push(id)
     const { rows } = await pool.query(
       `UPDATE products SET ${sets.join(', ')} WHERE id = $${params.length}
-       RETURNING id, category, name, price, quantity, hsn_code, reorder_threshold, cost_price`,
+       RETURNING id, category, name, price, quantity, hsn_code, reorder_threshold, cost_price, warranty_months`,
       params
     )
     if (rows.length === 0) {
@@ -913,6 +926,479 @@ app.get('/api/purchase-orders', requireAuth, async (req, res) => {
   }
 })
 
+// --- AMC contracts ---
+
+app.get('/api/amc-contracts', requireAuth, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
+    const offset = (page - 1) * pageSize
+
+    const params = []
+    let where = ''
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`)
+      where = `WHERE a.contract_number ILIKE $${params.length} OR c.name ILIKE $${params.length}`
+    }
+    if (req.query.status && ['active', 'expired', 'cancelled'].includes(req.query.status)) {
+      params.push(req.query.status)
+      where += `${where ? ' AND' : 'WHERE'} (
+        CASE
+          WHEN a.cancelled THEN 'cancelled'
+          WHEN a.end_date >= CURRENT_DATE THEN 'active'
+          ELSE 'expired'
+        END
+      ) = $${params.length}`
+    }
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM amc_contracts a LEFT JOIN customers c ON c.id = a.customer_id ${where}`,
+      params
+    )
+    const total = countResult.rows[0].total
+
+    params.push(pageSize)
+    params.push(offset)
+    const itemsResult = await pool.query(
+      `SELECT a.id, a.contract_number, a.customer_id, c.name AS customer_name, a.start_date, a.end_date,
+              a.amount, a.covered_devices, a.notes, a.cancelled, a.created_by_username, a.created_at,
+              CASE
+                WHEN a.cancelled THEN 'cancelled'
+                WHEN a.end_date >= CURRENT_DATE THEN 'active'
+                ELSE 'expired'
+              END AS status
+       FROM amc_contracts a
+       LEFT JOIN customers c ON c.id = a.customer_id
+       ${where}
+       ORDER BY a.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    res.json({
+      items: itemsResult.rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
+  } catch (err) {
+    console.error('GET /api/amc-contracts failed:', err)
+    res.status(500).json({ message: 'Could not load AMC contracts' })
+  }
+})
+
+app.get('/api/amc-contracts/:id', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid contract id' })
+    }
+
+    const { rows } = await pool.query(
+      `SELECT a.id, a.contract_number, a.customer_id, c.name AS customer_name, a.start_date, a.end_date,
+              a.amount, a.covered_devices, a.notes, a.cancelled, a.created_by_username, a.created_at,
+              CASE
+                WHEN a.cancelled THEN 'cancelled'
+                WHEN a.end_date >= CURRENT_DATE THEN 'active'
+                ELSE 'expired'
+              END AS status
+       FROM amc_contracts a
+       LEFT JOIN customers c ON c.id = a.customer_id
+       WHERE a.id = $1`,
+      [id]
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Contract not found' })
+    }
+
+    const tickets = await pool.query(
+      `SELECT id, ticket_number, status, received_date, created_at
+       FROM repair_tickets WHERE amc_contract_id = $1 ORDER BY created_at DESC`,
+      [id]
+    )
+
+    res.json({ contract: rows[0], repairTickets: tickets.rows })
+  } catch (err) {
+    console.error('GET /api/amc-contracts/:id failed:', err)
+    res.status(500).json({ message: 'Could not load contract' })
+  }
+})
+
+app.post('/api/amc-contracts', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+  try {
+    const { contractNumber, customerId, startDate, endDate, amount, coveredDevices, notes } = req.body || {}
+
+    const number = typeof contractNumber === 'string' ? contractNumber.trim() : ''
+    if (!number) {
+      return res.status(400).json({ message: 'Contract number is required' })
+    }
+    const custId = parseInt(customerId, 10)
+    if (!Number.isInteger(custId)) {
+      return res.status(400).json({ message: 'A customer is required' })
+    }
+    if (!isValidDateString(startDate) || !isValidDateString(endDate)) {
+      return res.status(400).json({ message: 'Valid start and end dates (YYYY-MM-DD) are required' })
+    }
+    if (endDate < startDate) {
+      return res.status(400).json({ message: 'End date cannot be before the start date' })
+    }
+    const amountNum = Number(amount)
+    if (!Number.isFinite(amountNum) || amountNum < 0) {
+      return res.status(400).json({ message: 'Invalid amount' })
+    }
+
+    const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+
+    const { rows } = await pool.query(
+      `INSERT INTO amc_contracts
+         (contract_number, customer_id, start_date, end_date, amount, covered_devices, notes,
+          created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, contract_number, customer_id, start_date, end_date, amount, covered_devices, notes,
+                 cancelled, created_by_username, created_at`,
+      [number, custId, startDate, endDate, amountNum, clean(coveredDevices), clean(notes), req.user.id, req.user.username]
+    )
+    const contract = rows[0]
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'amc_contract.create',
+      entityType: 'amc_contract',
+      entityId: contract.id,
+      details: { contractNumber: number, customerId: custId },
+    })
+
+    res.status(201).json({ contract })
+  } catch (err) {
+    if (err.code === '23503') {
+      return res.status(400).json({ message: 'That customer no longer exists' })
+    }
+    console.error('POST /api/amc-contracts failed:', err)
+    res.status(500).json({ message: 'Could not create contract' })
+  }
+})
+
+app.patch('/api/amc-contracts/:id', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid contract id' })
+    }
+
+    const sets = []
+    const params = []
+    const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+
+    if (typeof req.body?.endDate === 'string') {
+      if (!isValidDateString(req.body.endDate)) {
+        return res.status(400).json({ message: 'Invalid end date' })
+      }
+      params.push(req.body.endDate)
+      sets.push(`end_date = $${params.length}`)
+    }
+    if (req.body?.amount !== undefined) {
+      const amountNum = Number(req.body.amount)
+      if (!Number.isFinite(amountNum) || amountNum < 0) {
+        return res.status(400).json({ message: 'Invalid amount' })
+      }
+      params.push(amountNum)
+      sets.push(`amount = $${params.length}`)
+    }
+    if (typeof req.body?.coveredDevices === 'string') {
+      params.push(clean(req.body.coveredDevices))
+      sets.push(`covered_devices = $${params.length}`)
+    }
+    if (typeof req.body?.notes === 'string') {
+      params.push(clean(req.body.notes))
+      sets.push(`notes = $${params.length}`)
+    }
+    if (typeof req.body?.cancelled === 'boolean') {
+      params.push(req.body.cancelled)
+      sets.push(`cancelled = $${params.length}`)
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ message: 'Nothing to update' })
+    }
+
+    params.push(id)
+    const { rows } = await pool.query(
+      `UPDATE amc_contracts SET ${sets.join(', ')} WHERE id = $${params.length}
+       RETURNING id, contract_number, customer_id, start_date, end_date, amount, covered_devices, notes,
+                 cancelled, created_by_username, created_at`,
+      params
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Contract not found' })
+    }
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'amc_contract.update',
+      entityType: 'amc_contract',
+      entityId: id,
+      details: { fields: Object.keys(req.body || {}) },
+    })
+
+    res.json({ contract: rows[0] })
+  } catch (err) {
+    console.error('PATCH /api/amc-contracts/:id failed:', err)
+    res.status(500).json({ message: 'Could not update contract' })
+  }
+})
+
+// --- Repair / service tickets ---
+
+const TICKET_STATUSES = [
+  'received', 'diagnosing', 'waiting_for_parts', 'in_repair', 'ready_for_pickup', 'completed', 'cancelled',
+]
+
+app.get('/api/repair-tickets', requireAuth, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
+    const offset = (page - 1) * pageSize
+
+    const conditions = []
+    const params = []
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`)
+      conditions.push(`(t.ticket_number ILIKE $${params.length} OR c.name ILIKE $${params.length} OR t.device_description ILIKE $${params.length})`)
+    }
+    if (req.query.status && TICKET_STATUSES.includes(req.query.status)) {
+      params.push(req.query.status)
+      conditions.push(`t.status = $${params.length}`)
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM repair_tickets t LEFT JOIN customers c ON c.id = t.customer_id ${where}`,
+      params
+    )
+    const total = countResult.rows[0].total
+
+    params.push(pageSize)
+    params.push(offset)
+    const itemsResult = await pool.query(
+      `SELECT t.id, t.ticket_number, t.customer_id, c.name AS customer_name, c.phone AS customer_phone,
+              t.device_description, t.serial_number, t.reported_issue, t.diagnosis, t.status,
+              t.estimated_cost, t.final_cost, t.invoice_number, t.amc_contract_id, t.warranty_days,
+              t.received_date, t.completed_date, t.assigned_to_username, t.notes,
+              t.created_by_username, t.created_at
+       FROM repair_tickets t
+       LEFT JOIN customers c ON c.id = t.customer_id
+       ${where}
+       ORDER BY t.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    res.json({
+      items: itemsResult.rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
+  } catch (err) {
+    console.error('GET /api/repair-tickets failed:', err)
+    res.status(500).json({ message: 'Could not load repair tickets' })
+  }
+})
+
+app.get('/api/repair-tickets/:id', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid ticket id' })
+    }
+
+    const { rows } = await pool.query(
+      `SELECT t.id, t.ticket_number, t.customer_id, c.name AS customer_name, c.phone AS customer_phone,
+              c.address AS customer_address, t.device_description, t.serial_number, t.reported_issue,
+              t.diagnosis, t.status, t.estimated_cost, t.final_cost, t.invoice_number, t.amc_contract_id,
+              t.warranty_days, t.received_date, t.completed_date, t.assigned_to_username, t.notes,
+              t.created_by_username, t.created_at
+       FROM repair_tickets t
+       LEFT JOIN customers c ON c.id = t.customer_id
+       WHERE t.id = $1`,
+      [id]
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Ticket not found' })
+    }
+
+    res.json({ ticket: rows[0] })
+  } catch (err) {
+    console.error('GET /api/repair-tickets/:id failed:', err)
+    res.status(500).json({ message: 'Could not load ticket' })
+  }
+})
+
+app.post('/api/repair-tickets', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+  try {
+    const {
+      ticketNumber, customerId, deviceDescription, serialNumber, reportedIssue,
+      estimatedCost, receivedDate, amcContractId,
+    } = req.body || {}
+
+    const number = typeof ticketNumber === 'string' ? ticketNumber.trim() : ''
+    if (!number) {
+      return res.status(400).json({ message: 'Ticket number is required' })
+    }
+    const custId = parseInt(customerId, 10)
+    if (!Number.isInteger(custId)) {
+      return res.status(400).json({ message: 'A customer is required' })
+    }
+    const device = typeof deviceDescription === 'string' ? deviceDescription.trim() : ''
+    if (!device) {
+      return res.status(400).json({ message: 'Device description is required' })
+    }
+    const issue = typeof reportedIssue === 'string' ? reportedIssue.trim() : ''
+    if (!issue) {
+      return res.status(400).json({ message: 'Reported issue is required' })
+    }
+    if (!isValidDateString(receivedDate)) {
+      return res.status(400).json({ message: 'A valid received date (YYYY-MM-DD) is required' })
+    }
+
+    let estCost = null
+    if (estimatedCost !== undefined && estimatedCost !== null && estimatedCost !== '') {
+      estCost = Number(estimatedCost)
+      if (!Number.isFinite(estCost) || estCost < 0) {
+        return res.status(400).json({ message: 'Invalid estimated cost' })
+      }
+    }
+    let contractId = null
+    if (amcContractId != null && amcContractId !== '') {
+      contractId = parseInt(amcContractId, 10)
+      if (!Number.isInteger(contractId)) {
+        return res.status(400).json({ message: 'Invalid AMC contract reference' })
+      }
+    }
+
+    const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+
+    const { rows } = await pool.query(
+      `INSERT INTO repair_tickets
+         (ticket_number, customer_id, device_description, serial_number, reported_issue,
+          estimated_cost, received_date, amc_contract_id, created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id, ticket_number, customer_id, device_description, serial_number, reported_issue,
+                 status, estimated_cost, received_date, amc_contract_id, created_by_username, created_at`,
+      [number, custId, device, clean(serialNumber), issue, estCost, receivedDate, contractId, req.user.id, req.user.username]
+    )
+    const ticket = rows[0]
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'repair_ticket.create',
+      entityType: 'repair_ticket',
+      entityId: ticket.id,
+      details: { ticketNumber: number, customerId: custId },
+    })
+
+    res.status(201).json({ ticket })
+  } catch (err) {
+    if (err.code === '23503') {
+      return res.status(400).json({ message: 'That customer or AMC contract no longer exists' })
+    }
+    console.error('POST /api/repair-tickets failed:', err)
+    res.status(500).json({ message: 'Could not create repair ticket' })
+  }
+})
+
+app.patch('/api/repair-tickets/:id', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid ticket id' })
+    }
+
+    const sets = []
+    const params = []
+    const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+
+    if (typeof req.body?.status === 'string') {
+      if (!TICKET_STATUSES.includes(req.body.status)) {
+        return res.status(400).json({ message: `Status must be one of: ${TICKET_STATUSES.join(', ')}` })
+      }
+      params.push(req.body.status)
+      sets.push(`status = $${params.length}`)
+    }
+    if (typeof req.body?.diagnosis === 'string') {
+      params.push(clean(req.body.diagnosis))
+      sets.push(`diagnosis = $${params.length}`)
+    }
+    if (req.body?.finalCost !== undefined) {
+      const finalCost = req.body.finalCost === null || req.body.finalCost === '' ? null : Number(req.body.finalCost)
+      if (finalCost !== null && (!Number.isFinite(finalCost) || finalCost < 0)) {
+        return res.status(400).json({ message: 'Invalid final cost' })
+      }
+      params.push(finalCost)
+      sets.push(`final_cost = $${params.length}`)
+    }
+    if (typeof req.body?.invoiceNumber === 'string') {
+      params.push(clean(req.body.invoiceNumber))
+      sets.push(`invoice_number = $${params.length}`)
+    }
+    if (req.body?.warrantyDays !== undefined) {
+      const warrantyDays = req.body.warrantyDays === null || req.body.warrantyDays === '' ? null : parseInt(req.body.warrantyDays, 10)
+      if (warrantyDays !== null && (!Number.isInteger(warrantyDays) || warrantyDays < 0)) {
+        return res.status(400).json({ message: 'Invalid warranty days' })
+      }
+      params.push(warrantyDays)
+      sets.push(`warranty_days = $${params.length}`)
+    }
+    if (typeof req.body?.completedDate === 'string') {
+      if (req.body.completedDate && !isValidDateString(req.body.completedDate)) {
+        return res.status(400).json({ message: 'Invalid completed date' })
+      }
+      params.push(req.body.completedDate || null)
+      sets.push(`completed_date = $${params.length}`)
+    }
+    if (typeof req.body?.assignedToUsername === 'string') {
+      params.push(clean(req.body.assignedToUsername))
+      sets.push(`assigned_to_username = $${params.length}`)
+    }
+    if (typeof req.body?.notes === 'string') {
+      params.push(clean(req.body.notes))
+      sets.push(`notes = $${params.length}`)
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ message: 'Nothing to update' })
+    }
+
+    params.push(id)
+    const { rows } = await pool.query(
+      `UPDATE repair_tickets SET ${sets.join(', ')} WHERE id = $${params.length}
+       RETURNING id, ticket_number, customer_id, device_description, serial_number, reported_issue,
+                 diagnosis, status, estimated_cost, final_cost, invoice_number, amc_contract_id,
+                 warranty_days, received_date, completed_date, assigned_to_username, notes,
+                 created_by_username, created_at`,
+      params
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Ticket not found' })
+    }
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'repair_ticket.update',
+      entityType: 'repair_ticket',
+      entityId: id,
+      details: { fields: Object.keys(req.body || {}) },
+    })
+
+    res.json({ ticket: rows[0] })
+  } catch (err) {
+    console.error('PATCH /api/repair-tickets/:id failed:', err)
+    res.status(500).json({ message: 'Could not update repair ticket' })
+  }
+})
+
 app.post('/api/quotations', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
   try {
     const { quotationNumber, quotationDate, customerName, customerId, items: rawItems, gstRate } = req.body || {}
@@ -1026,6 +1512,7 @@ app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req
       customerAddress,
       paymentMethod,
       quotationNumber,
+      ticketNumber,
       items: rawItems,
       amountReceived,
       gstRate,
@@ -1076,6 +1563,8 @@ app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req
     const payment = typeof paymentMethod === 'string' && paymentMethod.trim() ? paymentMethod.trim() : null
     const refQuotation =
       typeof quotationNumber === 'string' && quotationNumber.trim() ? quotationNumber.trim() : null
+    const refTicket =
+      typeof ticketNumber === 'string' && ticketNumber.trim() ? ticketNumber.trim() : null
 
     await client.query('BEGIN')
 
@@ -1106,14 +1595,14 @@ app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req
     const { rows } = await client.query(
       `INSERT INTO invoices
          (invoice_number, invoice_date, customer_name, customer_id, customer_phone, customer_address,
-          payment_method, quotation_number, items, subtotal, gst_rate, gst_amount, grand_total,
+          payment_method, quotation_number, ticket_number, items, subtotal, gst_rate, gst_amount, grand_total,
           created_by_user_id, created_by_username)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        RETURNING id, invoice_number, invoice_date, customer_name, customer_phone, customer_address,
-                 payment_method, quotation_number, items, subtotal, gst_rate, gst_amount, grand_total,
-                 created_by_username, created_at`,
+                 payment_method, quotation_number, ticket_number, items, subtotal, gst_rate, gst_amount,
+                 grand_total, created_by_username, created_at`,
       [
-        number, invoiceDate, customer, custId, phone, address, payment, refQuotation,
+        number, invoiceDate, customer, custId, phone, address, payment, refQuotation, refTicket,
         JSON.stringify(validation.items), subtotal, rate, gstAmount, grandTotal, req.user.id, req.user.username,
       ]
     )
@@ -1246,7 +1735,7 @@ app.get('/api/invoices', requireAuth, async (req, res) => {
     params.push(offset)
     const itemsResult = await pool.query(
       `SELECT i.id, i.invoice_number, i.invoice_date, i.customer_name, i.customer_id, i.customer_phone,
-              i.customer_address, i.payment_method, i.quotation_number, i.items,
+              i.customer_address, i.payment_method, i.quotation_number, i.ticket_number, i.items,
               i.subtotal, i.gst_rate, i.gst_amount, i.grand_total,
               i.created_by_username, i.created_at,
               COALESCE(pay.paid, 0) AS amount_paid,

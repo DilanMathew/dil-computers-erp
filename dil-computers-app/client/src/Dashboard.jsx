@@ -11,6 +11,10 @@ import CreatePurchaseOrder from './CreatePurchaseOrder'
 import PurchaseOrders from './PurchaseOrders'
 import Suppliers from './Suppliers'
 import LowStock from './LowStock'
+import CreateRepairTicket from './CreateRepairTicket'
+import RepairTickets from './RepairTickets'
+import CreateAmcContract from './CreateAmcContract'
+import AmcContracts from './AmcContracts'
 
 // Which roles see each tab. 'sales' can create and view sales/purchasing
 // documents; 'accountant' can view them but not create (read-only);
@@ -26,6 +30,10 @@ const TABS = [
   { id: 'suppliers', label: 'Suppliers', roles: ['admin', 'sales', 'accountant'], Component: Suppliers },
   { id: 'lowStock', label: 'Low Stock', roles: ['admin', 'sales', 'accountant'], Component: LowStock },
   { id: 'catalogue', label: 'Product Catalogue', roles: ['admin', 'sales', 'accountant'], Component: Catalogue },
+  { id: 'repairTicket', label: 'Create Repair Ticket', roles: ['admin', 'sales'], Component: CreateRepairTicket },
+  { id: 'repairTickets', label: 'Repair Tickets', roles: ['admin', 'sales', 'accountant'], Component: RepairTickets },
+  { id: 'amcContract', label: 'Create AMC Contract', roles: ['admin', 'sales'], Component: CreateAmcContract },
+  { id: 'amcContracts', label: 'AMC Contracts', roles: ['admin', 'sales', 'accountant'], Component: AmcContracts },
   { id: 'users', label: 'Users', roles: ['admin'], Component: Users },
   { id: 'audit', label: 'Audit Log', roles: ['admin'], Component: AuditLog },
 ]

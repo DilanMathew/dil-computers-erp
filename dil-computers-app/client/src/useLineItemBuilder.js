@@ -146,6 +146,7 @@ export default function useLineItemBuilder({ token, onLogout }) {
         finalPrice: resolvedFinalPrice,
         sameAsCatalogue,
         hsnCode: selectedProduct.hsn_code || null,
+        warrantyMonths: selectedProduct.warranty_months || null,
       },
     }
   }
