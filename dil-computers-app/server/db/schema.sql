@@ -337,3 +337,10 @@ CREATE TABLE IF NOT EXISTS payroll_records (
 CREATE INDEX IF NOT EXISTS payroll_records_staff_idx ON payroll_records (staff_id);
 CREATE INDEX IF NOT EXISTS payroll_records_period_idx ON payroll_records (pay_period);
 CREATE INDEX IF NOT EXISTS payroll_records_created_at_idx ON payroll_records (created_at DESC);
+
+-- Manual override/supplement for Customer Insights (admin only) — e.g.
+-- "VIP", "Watch", "Do not extend credit". Distinct from the computed
+-- health badge (spend/frequency/payment history), which is always
+-- derived live and never stored; this is the one thing a person sets by
+-- hand when the numbers don't tell the whole story.
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS risk_tag TEXT;

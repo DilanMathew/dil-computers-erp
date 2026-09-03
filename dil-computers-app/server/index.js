@@ -551,6 +551,249 @@ app.patch('/api/customers/:id', requireAuth, requireRole('admin', 'sales'), asyn
   }
 })
 
+// --- Customer Insights (admin only) ---
+//
+// Every metric here is computed live from invoices/payments/credit_notes/
+// repair_tickets/amc_contracts — nothing is stored, same "compute, don't
+// store" pattern as invoice payment status. risk_tag on customers is the
+// one exception: a manual override a person sets by hand when the numbers
+// don't tell the whole story.
+//
+// "Late" is a 30-day proxy (no due-date/credit-terms concept exists yet):
+// an invoice counts as late if it took more than 30 days from invoice_date
+// to be paid in full, or if it's still unpaid/partial and is already more
+// than 30 days old.
+
+const CUSTOMER_INSIGHTS_CTE = `
+  WITH invoice_stats AS (
+    SELECT
+      i.customer_id,
+      COUNT(*) AS invoice_count,
+      SUM(i.grand_total) AS total_spent,
+      AVG(i.grand_total) AS avg_order_value,
+      MIN(i.invoice_date) AS first_purchase_date,
+      MAX(i.invoice_date) AS last_purchase_date,
+      SUM(i.grand_total - COALESCE(pay.paid, 0)) AS outstanding_balance,
+      SUM(CASE WHEN i.invoice_date <= CURRENT_DATE - INTERVAL '30 days' AND (i.grand_total - COALESCE(pay.paid, 0)) > 0.01
+               THEN i.grand_total - COALESCE(pay.paid, 0) ELSE 0 END) AS overdue_amount,
+      COUNT(*) FILTER (
+        WHERE ((i.grand_total - COALESCE(pay.paid, 0)) <= 0.01 AND pay.last_payment_date IS NOT NULL AND (pay.last_payment_date - i.invoice_date) > 30)
+           OR ((i.grand_total - COALESCE(pay.paid, 0)) > 0.01 AND i.invoice_date <= CURRENT_DATE - INTERVAL '30 days')
+      ) AS late_payment_count,
+      AVG(pay.last_payment_date - i.invoice_date) FILTER (
+        WHERE (i.grand_total - COALESCE(pay.paid, 0)) <= 0.01 AND pay.last_payment_date IS NOT NULL
+      ) AS avg_days_to_pay
+    FROM invoices i
+    LEFT JOIN LATERAL (
+      SELECT SUM(amount) AS paid, MAX(payment_date) AS last_payment_date
+      FROM payments WHERE invoice_id = i.id
+    ) pay ON true
+    WHERE i.customer_id IS NOT NULL
+    GROUP BY i.customer_id
+  ),
+  return_stats AS (
+    SELECT inv.customer_id, SUM(cn.grand_total) AS return_value
+    FROM credit_notes cn
+    JOIN invoices inv ON inv.id = cn.invoice_id
+    WHERE inv.customer_id IS NOT NULL
+    GROUP BY inv.customer_id
+  ),
+  service_stats AS (
+    SELECT customer_id, COUNT(*) AS repair_ticket_count
+    FROM repair_tickets
+    WHERE customer_id IS NOT NULL
+    GROUP BY customer_id
+  ),
+  amc_stats AS (
+    SELECT customer_id,
+      COUNT(*) FILTER (WHERE NOT cancelled AND end_date >= CURRENT_DATE) AS active_amc_count,
+      COUNT(*) FILTER (WHERE NOT cancelled AND end_date >= CURRENT_DATE AND end_date <= CURRENT_DATE + INTERVAL '30 days') AS amc_expiring_soon_count
+    FROM amc_contracts
+    WHERE customer_id IS NOT NULL
+    GROUP BY customer_id
+  ),
+  customer_insights AS (
+    SELECT
+      c.id, c.name, c.phone, c.email, c.address, c.notes, c.risk_tag, c.created_at,
+      COALESCE(s.invoice_count, 0) AS invoice_count,
+      COALESCE(s.total_spent, 0) AS total_spent,
+      s.avg_order_value,
+      s.first_purchase_date,
+      s.last_purchase_date,
+      COALESCE(s.outstanding_balance, 0) AS outstanding_balance,
+      COALESCE(s.overdue_amount, 0) AS overdue_amount,
+      COALESCE(s.late_payment_count, 0) AS late_payment_count,
+      s.avg_days_to_pay,
+      COALESCE(r.return_value, 0) AS return_value,
+      COALESCE(sv.repair_ticket_count, 0) AS repair_ticket_count,
+      COALESCE(a.active_amc_count, 0) AS active_amc_count,
+      COALESCE(a.amc_expiring_soon_count, 0) AS amc_expiring_soon_count,
+      CASE WHEN COALESCE(s.invoice_count, 0) > 1
+           THEN (s.last_purchase_date - s.first_purchase_date)::float / (s.invoice_count - 1)
+           ELSE NULL END AS avg_days_between_purchases,
+      CASE WHEN s.last_purchase_date IS NOT NULL
+           THEN (CURRENT_DATE - s.last_purchase_date) ELSE NULL END AS days_since_last_purchase
+    FROM customers c
+    LEFT JOIN invoice_stats s ON s.customer_id = c.id
+    LEFT JOIN return_stats r ON r.customer_id = c.id
+    LEFT JOIN service_stats sv ON sv.customer_id = c.id
+    LEFT JOIN amc_stats a ON a.customer_id = c.id
+  )
+`
+
+// "Gone quiet": has a purchase-frequency baseline (2+ invoices) and it's
+// now been more than twice their usual gap since the last one.
+const FOLLOWUP_CONDITION = `(
+  overdue_amount > 0.01
+  OR amc_expiring_soon_count > 0
+  OR (avg_days_between_purchases IS NOT NULL AND days_since_last_purchase > 2 * avg_days_between_purchases)
+)`
+
+const INSIGHTS_SORTS = {
+  spend: 'total_spent DESC NULLS LAST',
+  frequency: 'invoice_count DESC, total_spent DESC',
+  recency: 'last_purchase_date ASC NULLS FIRST',
+  risk: 'overdue_amount DESC, late_payment_count DESC, total_spent DESC',
+}
+
+// Heuristic, not a credit bureau score — a starting point staff can
+// override with their own judgment via risk_tag.
+function computeHealthBadge(row) {
+  const overdue = Number(row.overdue_amount) || 0
+  const lateCount = Number(row.late_payment_count) || 0
+  const avgDaysToPay = row.avg_days_to_pay != null ? Number(row.avg_days_to_pay) : null
+  if (overdue > 0.01 && lateCount >= 2) return 'risk'
+  if (overdue > 0.01 || lateCount >= 1 || (avgDaysToPay != null && avgDaysToPay > 30)) return 'watch'
+  return 'good'
+}
+
+app.get('/api/customer-insights', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
+    const offset = (page - 1) * pageSize
+    const sortKey = INSIGHTS_SORTS[req.query.sort] ? req.query.sort : 'spend'
+
+    const conditions = ['invoice_count > 0']
+    const params = []
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`)
+      conditions.push(`(name ILIKE $${params.length} OR phone ILIKE $${params.length})`)
+    }
+    if (req.query.view === 'followup') {
+      conditions.push(FOLLOWUP_CONDITION)
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`
+
+    const countResult = await pool.query(
+      `${CUSTOMER_INSIGHTS_CTE} SELECT COUNT(*)::int AS total FROM customer_insights ${where}`,
+      params
+    )
+    const total = countResult.rows[0].total
+
+    params.push(pageSize)
+    params.push(offset)
+    const itemsResult = await pool.query(
+      `${CUSTOMER_INSIGHTS_CTE}
+       SELECT * FROM customer_insights
+       ${where}
+       ORDER BY ${INSIGHTS_SORTS[sortKey]}
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    res.json({
+      items: itemsResult.rows.map((row) => ({ ...row, healthBadge: computeHealthBadge(row) })),
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
+  } catch (err) {
+    console.error('GET /api/customer-insights failed:', err)
+    res.status(500).json({ message: 'Could not load customer insights' })
+  }
+})
+
+app.get('/api/customer-insights/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid customer id' })
+    }
+
+    const [insightsResult, invoicesResult, affinityResult] = await Promise.all([
+      pool.query(`${CUSTOMER_INSIGHTS_CTE} SELECT * FROM customer_insights WHERE id = $1`, [id]),
+      pool.query(
+        `SELECT i.id, i.invoice_number, i.invoice_date, i.customer_name, i.customer_phone, i.customer_address,
+                i.payment_method, i.quotation_number, i.ticket_number, i.items, i.subtotal, i.gst_rate,
+                i.gst_amount, i.grand_total, i.created_at,
+                COALESCE(pay.paid, 0) AS amount_paid,
+                i.grand_total - COALESCE(pay.paid, 0) AS balance_due
+         FROM invoices i
+         LEFT JOIN LATERAL (SELECT SUM(amount) AS paid FROM payments WHERE invoice_id = i.id) pay ON true
+         WHERE i.customer_id = $1
+         ORDER BY i.invoice_date DESC, i.id DESC`,
+        [id]
+      ),
+      pool.query(
+        `SELECT item->>'name' AS product_name, SUM((item->>'quantity')::int) AS total_qty, COUNT(*) AS times_bought
+         FROM invoices i, jsonb_array_elements(i.items) AS item
+         WHERE i.customer_id = $1
+         GROUP BY product_name
+         ORDER BY total_qty DESC
+         LIMIT 5`,
+        [id]
+      ),
+    ])
+
+    if (insightsResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Customer not found' })
+    }
+    const customer = insightsResult.rows[0]
+
+    res.json({
+      customer: { ...customer, healthBadge: computeHealthBadge(customer) },
+      invoices: invoicesResult.rows,
+      productAffinity: affinityResult.rows,
+    })
+  } catch (err) {
+    console.error('GET /api/customer-insights/:id failed:', err)
+    res.status(500).json({ message: 'Could not load customer insights' })
+  }
+})
+
+app.patch('/api/customer-insights/:id/tag', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid customer id' })
+    }
+    const riskTag = typeof req.body?.riskTag === 'string' && req.body.riskTag.trim() ? req.body.riskTag.trim() : null
+
+    const { rows } = await pool.query(
+      'UPDATE customers SET risk_tag = $1 WHERE id = $2 RETURNING id, risk_tag',
+      [riskTag, id]
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Customer not found' })
+    }
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'customer.tag',
+      entityType: 'customer',
+      entityId: id,
+      details: { riskTag },
+    })
+
+    res.json({ customer: rows[0] })
+  } catch (err) {
+    console.error('PATCH /api/customer-insights/:id/tag failed:', err)
+    res.status(500).json({ message: 'Could not update tag' })
+  }
+})
+
 app.get('/api/categories', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
