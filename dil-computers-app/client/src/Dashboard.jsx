@@ -132,18 +132,21 @@ const ACCENT = '#c9a648'
 
 const styles = {
   page: {
-    minHeight: '100vh',
+    height: '100vh',
+    overflow: 'hidden',
     background: '#eef1f6',
     padding: 0,
   },
   shell: {
     display: 'flex',
-    minHeight: '100vh',
+    height: '100%',
     alignItems: 'stretch',
   },
   sidebar: {
     width: 260,
     flexShrink: 0,
+    height: '100%',
+    overflow: 'hidden',
     background: `linear-gradient(180deg, ${NAVY} 0%, ${NAVY_DEEP} 100%)`,
     color: '#e2e8f0',
     display: 'flex',
@@ -188,6 +191,7 @@ const styles = {
   },
   nav: {
     flex: 1,
+    minHeight: 0,
     overflowY: 'auto',
     padding: '4px 12px',
   },
@@ -263,6 +267,7 @@ const styles = {
   },
   content: {
     flex: 1,
+    height: '100%',
     padding: '32px 36px',
     overflowY: 'auto',
   },
