@@ -92,6 +92,32 @@ async function ensureBootstrapAdmin(client) {
   console.log(`Created bootstrap admin account "${ADMIN_USERNAME}".`)
 }
 
+// Default demo account for the "staff" role (create-only access to
+// quotations and purchase orders — see server/index.js). Unlike the
+// bootstrap admin, this doesn't wait for an empty users table — it just
+// checks for this one username and creates it if missing, so it appears
+// on existing databases too. A no-op once the account exists, so it
+// won't clobber a password change or deactivation made through the Users
+// section afterward.
+const STAFF_USERNAME = 'staff1'
+const STAFF_PASSWORD = 'staff123'
+
+async function ensureDefaultStaffAccount(client) {
+  const { rows } = await client.query('SELECT id FROM users WHERE username = $1', [STAFF_USERNAME])
+  if (rows.length > 0) {
+    console.log(`"${STAFF_USERNAME}" account already exists — skipping.`)
+    return
+  }
+
+  const passwordHash = await hashPassword(STAFF_PASSWORD)
+  await client.query(
+    `INSERT INTO users (username, password_hash, full_name, role)
+     VALUES ($1, $2, $3, 'staff')`,
+    [STAFF_USERNAME, passwordHash, 'Staff']
+  )
+  console.log(`Created default staff account "${STAFF_USERNAME}".`)
+}
+
 function loadCsvRows() {
   const raw = fs.readFileSync(CSV_PATH, 'utf8')
   const records = parse(raw, { columns: true, skip_empty_lines: true, trim: true })
@@ -130,6 +156,7 @@ async function main() {
     await ensureSchema(client)
 
     await ensureBootstrapAdmin(client)
+    await ensureDefaultStaffAccount(client)
 
     const existing = await countProducts(client)
     if (existing > 0) {

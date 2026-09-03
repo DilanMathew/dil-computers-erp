@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, AuthError } from './api'
 
-const ROLES = ['admin', 'sales', 'accountant']
+const ROLES = ['admin', 'sales', 'accountant', 'staff']
 
 function formatDate(value) {
   return typeof value === 'string' ? value.slice(0, 10) : value

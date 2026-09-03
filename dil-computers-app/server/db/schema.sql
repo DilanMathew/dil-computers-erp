@@ -289,3 +289,51 @@ CREATE INDEX IF NOT EXISTS credit_notes_created_at_idx ON credit_notes (created_
 -- same pattern as hsn_code/reorder_threshold/warranty_months.
 ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode TEXT;
 CREATE INDEX IF NOT EXISTS products_barcode_idx ON products (barcode);
+
+-- HR roster (Staff Monitoring). Deliberately independent of "users" — not
+-- every employee needs a login (e.g. a technician who never touches the
+-- system), and not every login is HR-tracked (e.g. the bootstrap admin).
+-- user_id is an optional link for the minority that are both.
+-- earned_leave_balance is a plain stored balance (admin-adjustable), not a
+-- full accrual/request workflow.
+CREATE TABLE IF NOT EXISTS staff_members (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  position TEXT,
+  phone TEXT,
+  email TEXT,
+  join_date DATE,
+  salary NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  earned_leave_balance NUMERIC(6, 2) NOT NULL DEFAULT 0,
+  active BOOLEAN NOT NULL DEFAULT true,
+  notes TEXT,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_username TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS staff_members_name_idx ON staff_members (name);
+
+-- Payroll & Compensation. One row per payment run against a staff member —
+-- a month's salary, a bonus, a reimbursement, or any combination in one
+-- entry. total_amount is deliberately not stored — always derived as
+-- salary_amount + bonus_amount + reimbursement_amount, same "compute, don't
+-- store" pattern as invoice payment status and AMC contract status.
+CREATE TABLE IF NOT EXISTS payroll_records (
+  id SERIAL PRIMARY KEY,
+  staff_id INTEGER NOT NULL REFERENCES staff_members(id) ON DELETE RESTRICT,
+  pay_period TEXT NOT NULL,
+  payment_date DATE NOT NULL,
+  salary_amount NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  bonus_amount NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  reimbursement_amount NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_username TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS payroll_records_staff_idx ON payroll_records (staff_id);
+CREATE INDEX IF NOT EXISTS payroll_records_period_idx ON payroll_records (pay_period);
+CREATE INDEX IF NOT EXISTS payroll_records_created_at_idx ON payroll_records (created_at DESC);
