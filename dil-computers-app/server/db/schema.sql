@@ -120,3 +120,69 @@ CREATE TABLE IF NOT EXISTS payments (
 );
 
 CREATE INDEX IF NOT EXISTS payments_invoice_id_idx ON payments (invoice_id);
+
+-- Catalogue management fields: reorder_threshold drives the Low Stock
+-- view (a product needs restocking once quantity <= its threshold);
+-- cost_price is set from the most recent purchase order that received
+-- it (last-cost, not weighted-average — simple and good enough for a
+-- "what did we last pay" figure); hsn_code is India GST's product
+-- classification code, printed per line item on quotation/invoice PDFs.
+ALTER TABLE products ADD COLUMN IF NOT EXISTS reorder_threshold INTEGER;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS cost_price NUMERIC(10, 2);
+ALTER TABLE products ADD COLUMN IF NOT EXISTS hsn_code TEXT;
+
+-- Suppliers you buy from, and the purchase orders that receive stock
+-- from them. Receiving a PO increases products.quantity immediately
+-- (there's no separate "ordered, not yet arrived" state in this phase —
+-- creating a PO means the stock is in hand) and updates each product's
+-- cost_price to what was just paid.
+CREATE TABLE IF NOT EXISTS suppliers (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  phone TEXT,
+  email TEXT,
+  address TEXT,
+  gstin TEXT,
+  notes TEXT,
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_username TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS suppliers_name_idx ON suppliers USING gin (to_tsvector('simple', name));
+
+CREATE TABLE IF NOT EXISTS purchase_orders (
+  id SERIAL PRIMARY KEY,
+  po_number TEXT NOT NULL,
+  po_date DATE NOT NULL,
+  supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+  supplier_name TEXT,
+  items JSONB NOT NULL,
+  grand_total NUMERIC(12, 2) NOT NULL,
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_username TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS purchase_orders_number_idx ON purchase_orders (po_number);
+CREATE INDEX IF NOT EXISTS purchase_orders_created_at_idx ON purchase_orders (created_at DESC);
+
+-- GST: quotations/invoices split into subtotal (pre-tax) + gst_rate/
+-- gst_amount, with grand_total now meaning the tax-inclusive final
+-- total. Existing rows predate GST support, so they're backfilled as
+-- subtotal = grand_total, gst_rate/gst_amount = 0 — an accurate
+-- description of them (no tax was charged), not a data loss.
+ALTER TABLE quotations ADD COLUMN IF NOT EXISTS subtotal NUMERIC(12, 2);
+ALTER TABLE quotations ADD COLUMN IF NOT EXISTS gst_rate NUMERIC(5, 2) NOT NULL DEFAULT 0;
+ALTER TABLE quotations ADD COLUMN IF NOT EXISTS gst_amount NUMERIC(12, 2) NOT NULL DEFAULT 0;
+UPDATE quotations SET subtotal = grand_total WHERE subtotal IS NULL;
+ALTER TABLE quotations ALTER COLUMN subtotal SET NOT NULL;
+
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS subtotal NUMERIC(12, 2);
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS gst_rate NUMERIC(5, 2) NOT NULL DEFAULT 0;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS gst_amount NUMERIC(12, 2) NOT NULL DEFAULT 0;
+UPDATE invoices SET subtotal = grand_total WHERE subtotal IS NULL;
+ALTER TABLE invoices ALTER COLUMN subtotal SET NOT NULL;
+
+-- The buyer's own GST number, for GST-registered customers/suppliers.
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS gstin TEXT;

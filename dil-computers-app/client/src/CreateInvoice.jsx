@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, AuthError } from './api'
-import { formatPrice } from './format'
+import { formatPrice, GST_RATES, computeGstTotals } from './format'
 import { buildDocumentPdf, generateDocumentNumber, todayIso } from './documentPdf'
 import useLineItemBuilder from './useLineItemBuilder'
+import useCompanyInfo from './useCompanyInfo'
 import ProductPicker from './ProductPicker'
 import LineItemsTable from './LineItemsTable'
 import CustomerPicker from './CustomerPicker'
@@ -17,6 +18,7 @@ export default function CreateInvoice({ token, onLogout }) {
   const [customerPhone, setCustomerPhone] = useState('')
   const [customerAddress, setCustomerAddress] = useState('')
   const [paymentMethod, setPaymentMethod] = useState(PAYMENT_METHODS[0])
+  const [gstRate, setGstRate] = useState(18)
   const [fullyPaid, setFullyPaid] = useState(true)
   const [amountReceived, setAmountReceived] = useState('')
 
@@ -30,6 +32,8 @@ export default function CreateInvoice({ token, onLogout }) {
   const [saving, setSaving] = useState(false)
 
   const builder = useLineItemBuilder({ token, onLogout })
+  const companyInfo = useCompanyInfo()
+  const { subtotal, gstAmount, grandTotal } = computeGstTotals(lineItems, gstRate)
 
   // Look up quotations as the user types into the "reference quotation #"
   // field, so they can pick an existing one instead of retyping it exactly.
@@ -118,6 +122,7 @@ export default function CreateInvoice({ token, onLogout }) {
           quotationNumber: quotationQuery,
           items: lineItems,
           amountReceived: received,
+          gstRate,
         }),
       })
 
@@ -138,6 +143,11 @@ export default function CreateInvoice({ token, onLogout }) {
             : []),
         ],
         items: lineItems,
+        companyInfo,
+        subtotal,
+        gstRate,
+        gstAmount,
+        grandTotal,
       })
 
       setSuccessMessage(
@@ -170,8 +180,6 @@ export default function CreateInvoice({ token, onLogout }) {
       setSaving(false)
     }
   }
-
-  const grandTotal = lineItems.reduce((sum, item) => sum + item.finalPrice * item.quantity, 0)
 
   return (
     <div>
@@ -211,6 +219,14 @@ export default function CreateInvoice({ token, onLogout }) {
           >
             {PAYMENT_METHODS.map((m) => (
               <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label style={styles.label} htmlFor="gstRate">GST rate</label>
+          <select id="gstRate" style={styles.input} value={gstRate} onChange={(e) => setGstRate(Number(e.target.value))}>
+            {GST_RATES.map((r) => (
+              <option key={r} value={r}>{r === 0 ? 'No GST' : `${r}%`}</option>
             ))}
           </select>
         </div>
@@ -342,7 +358,15 @@ export default function CreateInvoice({ token, onLogout }) {
       {successMessage && <div style={styles.success}>{successMessage}</div>}
 
       <div style={styles.footer}>
-        <span style={styles.grandTotal}>Grand total: {formatPrice(grandTotal)}</span>
+        <div style={styles.totalsBlock}>
+          {gstRate > 0 && (
+            <>
+              <span style={styles.totalsLine}>Subtotal: {formatPrice(subtotal)}</span>
+              <span style={styles.totalsLine}>GST ({gstRate}%): {formatPrice(gstAmount)}</span>
+            </>
+          )}
+          <span style={styles.grandTotal}>Grand total: {formatPrice(grandTotal)}</span>
+        </div>
         <button
           type="button"
           style={styles.createButton}
@@ -496,6 +520,15 @@ const styles = {
     flexWrap: 'wrap',
     gap: 12,
     marginTop: 16,
+  },
+  totalsBlock: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+  },
+  totalsLine: {
+    fontSize: 13,
+    color: '#64748b',
   },
   grandTotal: {
     fontSize: 16,

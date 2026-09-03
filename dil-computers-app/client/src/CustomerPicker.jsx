@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, AuthError } from './api'
 
-// Search-as-you-type customer lookup. Fully controlled: the parent owns
-// the text value and the selected id, this component just fetches
-// suggestions and reports what the user typed or picked. Typing after a
-// selection is treated as "not that customer anymore" by the parent
-// (it should clear the id whenever the text changes).
+// Search-as-you-type customer (or, via `endpoint`, supplier) lookup. Fully
+// controlled: the parent owns the text value and the selected id, this
+// component just fetches suggestions and reports what the user typed or
+// picked. Typing after a selection is treated as "not that one anymore" by
+// the parent (it should clear the id whenever the text changes).
 export default function CustomerPicker({
   token,
   onLogout,
@@ -16,6 +16,8 @@ export default function CustomerPicker({
   onSelect,
   placeholder = 'Search by name or phone…',
   required = false,
+  endpoint = '/api/customers',
+  emptyMessage = 'No matching customers — this will be saved as a walk-in.',
 }) {
   const [suggestions, setSuggestions] = useState([])
   const [show, setShow] = useState(false)
@@ -30,7 +32,7 @@ export default function CustomerPicker({
     let cancelled = false
     const timer = setTimeout(() => {
       setLoading(true)
-      apiFetch(`/api/customers?q=${encodeURIComponent(value)}&pageSize=6`, token)
+      apiFetch(`${endpoint}?q=${encodeURIComponent(value)}&pageSize=6`, token)
         .then((data) => {
           if (cancelled) return
           setSuggestions(data.items || [])
@@ -48,7 +50,7 @@ export default function CustomerPicker({
       cancelled = true
       clearTimeout(timer)
     }
-  }, [token, value, onLogout])
+  }, [token, value, onLogout, endpoint])
 
   return (
     <div style={{ position: 'relative' }}>
@@ -71,7 +73,7 @@ export default function CustomerPicker({
           {loading ? (
             <div style={styles.suggestionItem}>Loading…</div>
           ) : suggestions.length === 0 ? (
-            <div style={styles.suggestionItem}>No matching customers — this will be saved as a walk-in.</div>
+            <div style={styles.suggestionItem}>{emptyMessage}</div>
           ) : (
             suggestions.map((c) => (
               <div

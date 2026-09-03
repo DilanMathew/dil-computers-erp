@@ -145,6 +145,7 @@ export default function useLineItemBuilder({ token, onLogout }) {
         catalPrice: Number(selectedProduct.price),
         finalPrice: resolvedFinalPrice,
         sameAsCatalogue,
+        hsnCode: selectedProduct.hsn_code || null,
       },
     }
   }
