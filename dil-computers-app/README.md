@@ -11,6 +11,26 @@ only the sections your role can use:
   days), plus the 5 most recent invoices. All figures are computed live
   from the same data the other sections show — nothing here is a separate
   stored total that could drift.
+- **Customer Insights** *(admin only)* — a ranked leaderboard of every
+  customer with at least one invoice: total spend, invoice count, average
+  order value, last purchase date, outstanding balance, and a computed
+  **health badge** (Good / Watch / Risk) based on overdue amounts and
+  payment-lateness history. Sort by spend, frequency, recency (who's gone
+  quiet), or risk; filter to a **follow-up queue** — customers with an
+  overdue balance, an AMC contract expiring within 30 days, or who
+  haven't bought in twice their usual gap. Expand a row for the full
+  picture: customer-since date, average days between purchases, average
+  days to pay in full, late-payment count, return value, repair ticket
+  count, active AMC contracts, most-purchased products, a manual tag
+  (e.g. "VIP", "Do not extend credit" — a person's override sitting
+  alongside the computed badge, not replacing it), and the full invoice
+  history with a **re-download PDF** button per invoice (regenerated on
+  demand from the stored invoice data — nothing is saved as a file at
+  creation time). Every metric is computed live from
+  invoices/payments/credit notes/repair tickets/AMC contracts — nothing
+  here is a separately stored total that could drift. "Late" is a
+  30-day proxy against `invoice_date`, since there's no due-date/credit-
+  terms concept yet — good enough to flag risk, not a precise SLA.
 - **Create Quotation** *(admin, sales)* — pick a product category, search
   for a product by name, and set a quantity; the catalogue price
   auto-populates. Final price starts empty — tick "Same as catalogue price"
@@ -341,7 +361,10 @@ as invoice payment status and AMC contract status.
 
 **`customers`** — saved customer records (name, phone, email, address,
 notes), written by `POST /api/customers`. `name` is the only required
-field.
+field. `risk_tag` (nullable) is a manual, admin-set label from Customer
+Insights — everything else Customer Insights shows about a customer
+(spend, frequency, payment reliability, and so on) is computed on the fly
+from other tables, not stored here.
 
 **`payments`** — one row per payment against an invoice, written
 automatically when an invoice is created (for whatever was received at
@@ -356,7 +379,8 @@ can't drift out of sync with the payments actually on record.
 `payment.record`, `product.update`, `supplier.create`, `supplier.update`,
 `purchase_order.create`, `amc_contract.create`, `amc_contract.update`,
 `repair_ticket.create`, `repair_ticket.update`, `credit_note.create`,
-`product.bulk_import`, `staff.create`, `staff.update`, `payroll.create`),
+`product.bulk_import`, `staff.create`, `staff.update`, `payroll.create`,
+`customer.tag`),
 who did it, and a small JSON detail snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so
 deleting an account, if that's ever added, wouldn't take its history with
 it — `username` is kept alongside as a permanent snapshot either way.
