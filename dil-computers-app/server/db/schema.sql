@@ -252,3 +252,34 @@ CREATE INDEX IF NOT EXISTS repair_tickets_created_at_idx ON repair_tickets (crea
 -- Optional reference from an invoice back to the repair ticket it billed
 -- for — same free-text-reference pattern as invoices.quotation_number.
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS ticket_number TEXT;
+
+-- Credit notes / returns. Unlike quotation_number/ticket_number, invoice_id
+-- is a real foreign key (not free text) — validating a return means
+-- checking it against that specific invoice's actual line items and
+-- whatever's already been returned against it, so the reference has to be
+-- resolvable. The original invoice is never modified — it stays an
+-- immutable record of what was sold; a credit note is a separate,
+-- append-only record of what came back and what's owed to the customer as
+-- a result. Creating one increases the returned products' stock, mirroring
+-- how a purchase order increases it and an invoice decreases it.
+CREATE TABLE IF NOT EXISTS credit_notes (
+  id SERIAL PRIMARY KEY,
+  credit_note_number TEXT NOT NULL,
+  invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE RESTRICT,
+  invoice_number TEXT NOT NULL,
+  customer_name TEXT,
+  reason TEXT,
+  refund_method TEXT,
+  items JSONB NOT NULL,
+  subtotal NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  gst_rate NUMERIC(5, 2) NOT NULL DEFAULT 0,
+  gst_amount NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  grand_total NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_username TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS credit_notes_number_idx ON credit_notes (credit_note_number);
+CREATE INDEX IF NOT EXISTS credit_notes_invoice_idx ON credit_notes (invoice_id);
+CREATE INDEX IF NOT EXISTS credit_notes_created_at_idx ON credit_notes (created_at DESC);

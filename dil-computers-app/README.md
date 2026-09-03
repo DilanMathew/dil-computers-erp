@@ -4,6 +4,12 @@ React (Vite) frontend + Node/Express backend, backed by Postgres. Ships a
 login screen backed by real (multi-user, role-based) accounts, and — once
 logged in — a dashboard with sections scoped to your role:
 
+- **Overview** *(all roles)* — the landing tab: sales this month,
+  outstanding receivables, low-stock item count, open repair ticket count,
+  and active AMC contracts (with a call-out for any expiring within 30
+  days), plus the 5 most recent invoices. All figures are computed live
+  from the same data the other sections show — nothing here is a separate
+  stored total that could drift.
 - **Create Quotation** *(admin, sales)* — pick a product category, search
   for a product by name, and set a quantity; the catalogue price
   auto-populates. Final price starts empty — tick "Same as catalogue price"
@@ -33,6 +39,19 @@ logged in — a dashboard with sections scoped to your role:
   details, line items, payment history, and — while a balance remains — a
   form to record another payment against it (amount pre-filled to the
   exact balance due; the server refuses an amount that would overpay).
+- **Create Credit Note** *(admin, sales)* — process a return against an
+  existing invoice: search for the invoice, then enter a return quantity
+  against any of its line items (capped at what's left returnable, after
+  subtracting anything already returned on an earlier credit note against
+  the same invoice). Unit price and GST rate are taken from the original
+  invoice — not re-enterable — so a refund always matches what was
+  actually charged. **Create Credit Note** saves the record and
+  **increases catalogue stock** back by the returned quantities. The
+  original invoice itself is never modified; it stays an accurate record
+  of what was sold.
+- **Credit Notes** *(all roles)* — searchable, paginated list of every
+  credit note, with an expandable row showing the returned items, reason,
+  refund method, and GST breakdown.
 - **Customers** *(all roles view; admin/sales can add/edit)* — searchable,
   paginated list of saved customer records (name, phone, email, address,
   notes). An expandable row shows and edits those details plus every
@@ -231,6 +250,16 @@ a ticket doesn't carry its own line items. `warranty_days` is the shop's
 own warranty on the completed repair work, separate from any product
 warranty.
 
+**`credit_notes`** — returns against a specific invoice, written by
+`POST /api/credit-notes`. Unlike `quotation_number`/`ticket_number`,
+`invoice_id` is a real foreign key (not free text) — every return is
+validated against that invoice's actual line items and whatever's already
+been returned against it (summed from earlier credit notes' own `items`),
+so a line can never be over-returned even across multiple partial
+returns. The original invoice is never modified. Creating a credit note
+increases the returned products' `quantity`, mirroring how a purchase
+order increases it and an invoice decreases it.
+
 **`suppliers`** and **`purchase_orders`** — the buying-side mirror of
 `customers`/`invoices`. A PO's `items` JSONB carries category/product
 name/quantity/cost price per line; creating one increases the referenced
@@ -257,7 +286,7 @@ can't drift out of sync with the payments actually on record.
 `quotation.create`, `invoice.create`, `customer.create`, `customer.update`,
 `payment.record`, `product.update`, `supplier.create`, `supplier.update`,
 `purchase_order.create`, `amc_contract.create`, `amc_contract.update`,
-`repair_ticket.create`, `repair_ticket.update`), who did it, and a small
-JSON detail snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so
+`repair_ticket.create`, `repair_ticket.update`, `credit_note.create`),
+who did it, and a small JSON detail snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so
 deleting an account, if that's ever added, wouldn't take its history with
 it — `username` is kept alongside as a permanent snapshot either way.

@@ -1699,6 +1699,59 @@ app.post('/api/invoices/:id/payments', requireAuth, requireRole('admin', 'sales'
   }
 })
 
+// Everything needed to build a return against a specific invoice: its
+// line items, plus how much of each has already been returned via earlier
+// credit notes (summed from their stored items JSONB) so the frontend can
+// show — and the server can enforce — a per-line "returnable" ceiling.
+app.get('/api/invoices/:id/return-summary', requireAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid invoice id' })
+    }
+
+    const { rows } = await pool.query(
+      `SELECT id, invoice_number, customer_name, gst_rate, items FROM invoices WHERE id = $1`,
+      [id]
+    )
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Invoice not found' })
+    }
+    const invoice = rows[0]
+
+    const returnedResult = await pool.query(
+      `SELECT (item->>'productId')::int AS product_id, SUM((item->>'quantity')::int) AS returned_qty
+       FROM credit_notes, jsonb_array_elements(items) AS item
+       WHERE invoice_id = $1
+       GROUP BY product_id`,
+      [id]
+    )
+    const returnedMap = new Map(returnedResult.rows.map((r) => [r.product_id, Number(r.returned_qty)]))
+
+    const items = (invoice.items || []).map((item) => {
+      const alreadyReturned = returnedMap.get(item.productId) || 0
+      return {
+        ...item,
+        alreadyReturned,
+        maxReturnable: Math.max(item.quantity - alreadyReturned, 0),
+      }
+    })
+
+    res.json({
+      invoice: {
+        id: invoice.id,
+        invoiceNumber: invoice.invoice_number,
+        customerName: invoice.customer_name,
+        gstRate: invoice.gst_rate,
+      },
+      items,
+    })
+  } catch (err) {
+    console.error('GET /api/invoices/:id/return-summary failed:', err)
+    res.status(500).json({ message: 'Could not load return summary' })
+  }
+})
+
 app.get('/api/invoices', requireAuth, async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
@@ -1773,6 +1826,222 @@ app.get('/api/invoices', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('GET /api/invoices failed:', err)
     res.status(500).json({ message: 'Could not load invoices' })
+  }
+})
+
+// --- Credit notes / returns ---
+
+app.post('/api/credit-notes', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+  const client = await pool.connect()
+  try {
+    const { creditNoteNumber, invoiceId, reason, refundMethod, items: rawItems } = req.body || {}
+
+    const number = typeof creditNoteNumber === 'string' ? creditNoteNumber.trim() : ''
+    if (!number) {
+      return res.status(400).json({ message: 'Credit note number is required' })
+    }
+    const invId = parseInt(invoiceId, 10)
+    if (!Number.isInteger(invId)) {
+      return res.status(400).json({ message: 'An invoice reference is required' })
+    }
+    if (!Array.isArray(rawItems) || rawItems.length === 0) {
+      return res.status(400).json({ message: 'Pick at least one item to return' })
+    }
+
+    const { rows: invoiceRows } = await client.query(
+      `SELECT id, invoice_number, customer_name, gst_rate, items FROM invoices WHERE id = $1`,
+      [invId]
+    )
+    if (invoiceRows.length === 0) {
+      return res.status(404).json({ message: 'Invoice not found' })
+    }
+    const invoice = invoiceRows[0]
+    const invoiceItemsByProduct = new Map((invoice.items || []).map((it) => [it.productId, it]))
+
+    const returnedResult = await client.query(
+      `SELECT (item->>'productId')::int AS product_id, SUM((item->>'quantity')::int) AS returned_qty
+       FROM credit_notes, jsonb_array_elements(items) AS item
+       WHERE invoice_id = $1
+       GROUP BY product_id`,
+      [invId]
+    )
+    const returnedMap = new Map(returnedResult.rows.map((r) => [r.product_id, Number(r.returned_qty)]))
+
+    // Re-derive every return line from the invoice's own records — quantity
+    // is the only thing trusted from the request; price, category, name,
+    // and the returnable ceiling all come from the invoice and prior
+    // credit notes, not the client.
+    const returnItems = []
+    for (const raw of rawItems) {
+      const productId = parseInt(raw?.productId, 10)
+      const quantity = Number(raw?.quantity)
+      if (!Number.isInteger(productId) || !Number.isFinite(quantity) || quantity <= 0) {
+        return res.status(400).json({ message: 'Each return line needs a valid product and quantity' })
+      }
+      const invoiceItem = invoiceItemsByProduct.get(productId)
+      if (!invoiceItem) {
+        return res.status(400).json({ message: `That invoice has no line item for product ${productId}` })
+      }
+      const alreadyReturned = returnedMap.get(productId) || 0
+      const maxReturnable = invoiceItem.quantity - alreadyReturned
+      if (quantity > maxReturnable) {
+        return res.status(400).json({
+          message: `Cannot return ${quantity} of "${invoiceItem.name}" — only ${maxReturnable} left returnable.`,
+        })
+      }
+      returnItems.push({
+        productId,
+        category: invoiceItem.category,
+        name: invoiceItem.name,
+        quantity,
+        finalPrice: invoiceItem.finalPrice,
+      })
+    }
+
+    const subtotal = computeSubtotal(returnItems)
+    const gstRate = Number(invoice.gst_rate) || 0
+    const gstAmount = Math.round(subtotal * (gstRate / 100) * 100) / 100
+    const grandTotal = subtotal + gstAmount
+
+    await client.query('BEGIN')
+
+    // Returned stock goes back on the shelf — mirrors how a purchase order
+    // increases quantity and an invoice decreases it.
+    for (const item of returnItems) {
+      await client.query('UPDATE products SET quantity = quantity + $1 WHERE id = $2', [item.quantity, item.productId])
+    }
+
+    const { rows } = await client.query(
+      `INSERT INTO credit_notes
+         (credit_note_number, invoice_id, invoice_number, customer_name, reason, refund_method,
+          items, subtotal, gst_rate, gst_amount, grand_total, created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING id, credit_note_number, invoice_id, invoice_number, customer_name, reason, refund_method,
+                 items, subtotal, gst_rate, gst_amount, grand_total, created_by_username, created_at`,
+      [
+        number, invId, invoice.invoice_number, invoice.customer_name,
+        typeof reason === 'string' && reason.trim() ? reason.trim() : null,
+        typeof refundMethod === 'string' && refundMethod.trim() ? refundMethod.trim() : null,
+        JSON.stringify(returnItems), subtotal, gstRate, gstAmount, grandTotal, req.user.id, req.user.username,
+      ]
+    )
+    const creditNote = rows[0]
+
+    await client.query('COMMIT')
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'credit_note.create',
+      entityType: 'credit_note',
+      entityId: creditNote.id,
+      details: { creditNoteNumber: number, invoiceId: invId, grandTotal },
+    })
+
+    res.status(201).json({ creditNote })
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    console.error('POST /api/credit-notes failed:', err)
+    res.status(500).json({ message: 'Could not save credit note' })
+  } finally {
+    client.release()
+  }
+})
+
+app.get('/api/credit-notes', requireAuth, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
+    const offset = (page - 1) * pageSize
+
+    const params = []
+    let where = ''
+    if (req.query.q) {
+      params.push(`%${req.query.q}%`)
+      where = `WHERE credit_note_number ILIKE $${params.length} OR invoice_number ILIKE $${params.length} OR customer_name ILIKE $${params.length}`
+    }
+    if (req.query.invoiceId) {
+      const invId = parseInt(req.query.invoiceId, 10)
+      if (Number.isInteger(invId)) {
+        params.push(invId)
+        where += `${where ? ' AND' : 'WHERE'} invoice_id = $${params.length}`
+      }
+    }
+
+    const countResult = await pool.query(`SELECT COUNT(*)::int AS total FROM credit_notes ${where}`, params)
+    const total = countResult.rows[0].total
+
+    params.push(pageSize)
+    params.push(offset)
+    const itemsResult = await pool.query(
+      `SELECT id, credit_note_number, invoice_id, invoice_number, customer_name, reason, refund_method,
+              items, subtotal, gst_rate, gst_amount, grand_total, created_by_username, created_at
+       FROM credit_notes
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    res.json({
+      items: itemsResult.rows,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(Math.ceil(total / pageSize), 1),
+    })
+  } catch (err) {
+    console.error('GET /api/credit-notes failed:', err)
+    res.status(500).json({ message: 'Could not load credit notes' })
+  }
+})
+
+// --- Dashboard summary ---
+
+app.get('/api/dashboard-summary', requireAuth, async (req, res) => {
+  try {
+    const [salesThisMonth, receivables, lowStock, openTickets, activeAmc, expiringAmc, recentInvoices] = await Promise.all([
+      pool.query(
+        `SELECT COALESCE(SUM(grand_total), 0) AS total, COUNT(*)::int AS count
+         FROM invoices WHERE invoice_date >= date_trunc('month', CURRENT_DATE)`
+      ),
+      pool.query(
+        `SELECT COALESCE(SUM(i.grand_total - COALESCE(pay.paid, 0)), 0) AS total
+         FROM invoices i
+         LEFT JOIN LATERAL (SELECT SUM(amount) AS paid FROM payments WHERE invoice_id = i.id) pay ON true
+         WHERE COALESCE(pay.paid, 0) < i.grand_total`
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS count FROM products WHERE reorder_threshold IS NOT NULL AND quantity <= reorder_threshold`
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS count FROM repair_tickets WHERE status NOT IN ('completed', 'cancelled')`
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS count FROM amc_contracts WHERE NOT cancelled AND end_date >= CURRENT_DATE`
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS count FROM amc_contracts
+         WHERE NOT cancelled AND end_date >= CURRENT_DATE AND end_date <= CURRENT_DATE + INTERVAL '30 days'`
+      ),
+      pool.query(
+        `SELECT invoice_number, customer_name, grand_total, invoice_date
+         FROM invoices ORDER BY created_at DESC LIMIT 5`
+      ),
+    ])
+
+    res.json({
+      salesThisMonth: Number(salesThisMonth.rows[0].total),
+      invoiceCountThisMonth: salesThisMonth.rows[0].count,
+      outstandingReceivables: Number(receivables.rows[0].total),
+      lowStockCount: lowStock.rows[0].count,
+      openRepairTickets: openTickets.rows[0].count,
+      activeAmcContracts: activeAmc.rows[0].count,
+      amcContractsExpiringSoon: expiringAmc.rows[0].count,
+      recentInvoices: recentInvoices.rows,
+    })
+  } catch (err) {
+    console.error('GET /api/dashboard-summary failed:', err)
+    res.status(500).json({ message: 'Could not load dashboard summary' })
   }
 })
 
