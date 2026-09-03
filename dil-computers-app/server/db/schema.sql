@@ -283,3 +283,9 @@ CREATE TABLE IF NOT EXISTS credit_notes (
 CREATE INDEX IF NOT EXISTS credit_notes_number_idx ON credit_notes (credit_note_number);
 CREATE INDEX IF NOT EXISTS credit_notes_invoice_idx ON credit_notes (invoice_id);
 CREATE INDEX IF NOT EXISTS credit_notes_created_at_idx ON credit_notes (created_at DESC);
+
+-- Barcode for scan-to-find lookups (a barcode scanner just types the code
+-- into the same product search box) — admin-editable from the Catalogue,
+-- same pattern as hsn_code/reorder_threshold/warranty_months.
+ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode TEXT;
+CREATE INDEX IF NOT EXISTS products_barcode_idx ON products (barcode);

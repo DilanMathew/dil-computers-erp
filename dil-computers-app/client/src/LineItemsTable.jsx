@@ -24,7 +24,12 @@ export default function LineItemsTable({ items, onRemove }) {
             items.map((item) => (
               <tr key={item.id}>
                 <td style={styles.td}>{item.category}</td>
-                <td style={styles.td}>{item.name}</td>
+                <td style={styles.td}>
+                  {item.name}
+                  {item.serialNumbers && item.serialNumbers.length > 0 && (
+                    <div style={styles.serialsNote}>SN: {item.serialNumbers.join(', ')}</div>
+                  )}
+                </td>
                 <td style={{ ...styles.td, textAlign: 'right' }}>{item.quantity}</td>
                 <td style={{ ...styles.td, textAlign: 'right' }}>{formatPrice(item.catalPrice)}</td>
                 <td style={{ ...styles.td, textAlign: 'right' }}>{formatPrice(item.finalPrice)}</td>
@@ -69,6 +74,11 @@ const styles = {
     padding: '10px 12px',
     borderBottom: '1px solid #f1f5f9',
     color: '#0f172a',
+  },
+  serialsNote: {
+    marginTop: 2,
+    fontSize: 11,
+    color: '#64748b',
   },
   removeButton: {
     padding: '6px 10px',

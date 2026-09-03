@@ -9,6 +9,12 @@ const bcrypt = require('bcryptjs')
 // without upsetting the "." split used to unpack the token.
 
 const SECRET = process.env.AUTH_SECRET || 'dev-only-insecure-secret-change-me'
+if (!process.env.AUTH_SECRET) {
+  console.warn(
+    'AUTH_SECRET is not set — falling back to an insecure default. ' +
+      'Set a real AUTH_SECRET before deploying anywhere real users will log in.'
+  )
+}
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000 // 8 hours
 const BCRYPT_ROUNDS = 10
 

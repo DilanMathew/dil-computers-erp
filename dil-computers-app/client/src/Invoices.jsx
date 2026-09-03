@@ -223,7 +223,12 @@ export default function Invoices({ token, user, onLogout }) {
                             {(inv.items || []).map((item, idx) => (
                               <tr key={idx}>
                                 <td style={styles.innerTd}>{item.category}</td>
-                                <td style={styles.innerTd}>{item.name}</td>
+                                <td style={styles.innerTd}>
+                                  {item.name}
+                                  {item.serialNumbers && item.serialNumbers.length > 0 && (
+                                    <div style={styles.serialsNote}>SN: {item.serialNumbers.join(', ')}</div>
+                                  )}
+                                </td>
                                 <td style={{ ...styles.innerTd, textAlign: 'right' }}>{item.quantity}</td>
                                 <td style={{ ...styles.innerTd, textAlign: 'right' }}>
                                   {formatPrice(item.finalPrice)}
@@ -418,6 +423,11 @@ const styles = {
     padding: '6px 10px',
     borderBottom: '1px solid #f1f5f9',
     color: '#0f172a',
+  },
+  serialsNote: {
+    marginTop: 2,
+    fontSize: 11,
+    color: '#64748b',
   },
   totalsNote: {
     marginTop: 8,

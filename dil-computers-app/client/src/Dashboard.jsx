@@ -18,6 +18,7 @@ import CreateAmcContract from './CreateAmcContract'
 import AmcContracts from './AmcContracts'
 import CreateCreditNote from './CreateCreditNote'
 import CreditNotes from './CreditNotes'
+import CatalogueImportExport from './CatalogueImportExport'
 
 // Which roles see each tab. 'sales' can create and view sales/purchasing
 // documents; 'accountant' can view them but not create (read-only);
@@ -36,6 +37,7 @@ const TABS = [
   { id: 'suppliers', label: 'Suppliers', roles: ['admin', 'sales', 'accountant'], Component: Suppliers },
   { id: 'lowStock', label: 'Low Stock', roles: ['admin', 'sales', 'accountant'], Component: LowStock },
   { id: 'catalogue', label: 'Product Catalogue', roles: ['admin', 'sales', 'accountant'], Component: Catalogue },
+  { id: 'catalogueImportExport', label: 'Catalogue Import/Export', roles: ['admin'], Component: CatalogueImportExport },
   { id: 'repairTicket', label: 'Create Repair Ticket', roles: ['admin', 'sales'], Component: CreateRepairTicket },
   { id: 'repairTickets', label: 'Repair Tickets', roles: ['admin', 'sales', 'accountant'], Component: RepairTickets },
   { id: 'amcContract', label: 'Create AMC Contract', roles: ['admin', 'sales'], Component: CreateAmcContract },

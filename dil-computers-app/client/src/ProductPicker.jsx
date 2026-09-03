@@ -15,7 +15,9 @@ export default function ProductPicker({ builder }) {
     quantity,
     finalPrice,
     sameAsCatalogue,
+    serialNumbersText,
     setQuantity,
+    setSerialNumbersText,
     setShowSuggestions,
     handleCategoryChange,
     handleSelectSuggestion,
@@ -126,7 +128,20 @@ export default function ProductPicker({ builder }) {
       </div>
 
       {selectedProduct && (
-        <p style={styles.stockNote}>In stock: {selectedProduct.quantity.toLocaleString()}</p>
+        <>
+          <p style={styles.stockNote}>In stock: {selectedProduct.quantity.toLocaleString()}</p>
+          <div style={{ marginTop: 10 }}>
+            <label style={styles.label} htmlFor="serialNumbers">Serial numbers (optional, comma-separated)</label>
+            <input
+              id="serialNumbers"
+              style={styles.input}
+              type="text"
+              placeholder={`e.g. one per unit — leave blank if not tracked`}
+              value={serialNumbersText}
+              onChange={(e) => setSerialNumbersText(e.target.value)}
+            />
+          </div>
+        </>
       )}
     </div>
   )
