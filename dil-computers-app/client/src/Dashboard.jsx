@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import Overview from './Overview'
 import Catalogue from './Catalogue'
 import CreateQuotation from './CreateQuotation'
 import Quotations from './Quotations'
@@ -15,15 +16,20 @@ import CreateRepairTicket from './CreateRepairTicket'
 import RepairTickets from './RepairTickets'
 import CreateAmcContract from './CreateAmcContract'
 import AmcContracts from './AmcContracts'
+import CreateCreditNote from './CreateCreditNote'
+import CreditNotes from './CreditNotes'
 
 // Which roles see each tab. 'sales' can create and view sales/purchasing
 // documents; 'accountant' can view them but not create (read-only);
 // 'admin' sees everything plus user management and the audit log.
 const TABS = [
+  { id: 'overview', label: 'Overview', roles: ['admin', 'sales', 'accountant'], Component: Overview },
   { id: 'quotation', label: 'Create Quotation', roles: ['admin', 'sales'], Component: CreateQuotation },
   { id: 'quotations', label: 'Quotations', roles: ['admin', 'sales', 'accountant'], Component: Quotations },
   { id: 'invoice', label: 'Create Invoice', roles: ['admin', 'sales'], Component: CreateInvoice },
   { id: 'invoices', label: 'Invoices', roles: ['admin', 'sales', 'accountant'], Component: Invoices },
+  { id: 'creditNote', label: 'Create Credit Note', roles: ['admin', 'sales'], Component: CreateCreditNote },
+  { id: 'creditNotes', label: 'Credit Notes', roles: ['admin', 'sales', 'accountant'], Component: CreditNotes },
   { id: 'customers', label: 'Customers', roles: ['admin', 'sales', 'accountant'], Component: Customers },
   { id: 'purchaseOrder', label: 'Create Purchase Order', roles: ['admin', 'sales'], Component: CreatePurchaseOrder },
   { id: 'purchaseOrders', label: 'Purchase Orders', roles: ['admin', 'sales', 'accountant'], Component: PurchaseOrders },
