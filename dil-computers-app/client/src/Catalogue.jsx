@@ -7,6 +7,7 @@ const PAGE_SIZE = 50
 function ProductManageRow({ token, onLogout, product, onSaved }) {
   const [reorderThreshold, setReorderThreshold] = useState(product.reorder_threshold ?? '')
   const [hsnCode, setHsnCode] = useState(product.hsn_code || '')
+  const [warrantyMonths, setWarrantyMonths] = useState(product.warranty_months ?? '')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -20,6 +21,7 @@ function ProductManageRow({ token, onLogout, product, onSaved }) {
         body: JSON.stringify({
           reorderThreshold: reorderThreshold === '' ? null : reorderThreshold,
           hsnCode,
+          warrantyMonths: warrantyMonths === '' ? null : warrantyMonths,
         }),
       })
       onSaved()
@@ -58,6 +60,18 @@ function ProductManageRow({ token, onLogout, product, onSaved }) {
       <div>
         <label style={styles.manageLabel}>Last cost price</label>
         <input style={styles.manageInput} type="text" readOnly value={product.cost_price ? formatPrice(product.cost_price) : '—'} />
+      </div>
+      <div>
+        <label style={styles.manageLabel}>Warranty (months)</label>
+        <input
+          style={styles.manageInput}
+          type="number"
+          min="0"
+          step="1"
+          placeholder="Not set"
+          value={warrantyMonths}
+          onChange={(e) => setWarrantyMonths(e.target.value)}
+        />
       </div>
       <div style={styles.manageActions}>
         <button type="button" style={styles.smallButton} onClick={handleSave} disabled={saving}>
@@ -185,6 +199,7 @@ export default function Catalogue({ token, user, onLogout }) {
                 <th style={styles.th}>Category</th>
                 <th style={styles.th}>Product</th>
                 <th style={styles.th}>HSN</th>
+                <th style={styles.th}>Warranty</th>
                 <th style={{ ...styles.th, textAlign: 'right' }}>Price</th>
                 <th style={{ ...styles.th, textAlign: 'right' }}>Quantity</th>
               </tr>
@@ -192,11 +207,11 @@ export default function Catalogue({ token, user, onLogout }) {
             <tbody>
               {loading ? (
                 <tr>
-                  <td style={styles.td} colSpan={5}>Loading…</td>
+                  <td style={styles.td} colSpan={6}>Loading…</td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td style={styles.td} colSpan={5}>No products match your filters.</td>
+                  <td style={styles.td} colSpan={6}>No products match your filters.</td>
                 </tr>
               ) : (
                 items.map((p) => (
@@ -208,12 +223,13 @@ export default function Catalogue({ token, user, onLogout }) {
                       <td style={styles.td}>{p.category}</td>
                       <td style={styles.td}>{p.name}</td>
                       <td style={styles.td}>{p.hsn_code || '—'}</td>
+                      <td style={styles.td}>{p.warranty_months ? `${p.warranty_months} mo` : '—'}</td>
                       <td style={{ ...styles.td, textAlign: 'right' }}>{formatPrice(p.price)}</td>
                       <td style={{ ...styles.td, textAlign: 'right' }}>{p.quantity}</td>
                     </tr>
                     {canManage && expandedId === p.id && (
                       <tr>
-                        <td colSpan={5} style={{ padding: 0 }}>
+                        <td colSpan={6} style={{ padding: 0 }}>
                           <ProductManageRow
                             token={token}
                             onLogout={onLogout}
