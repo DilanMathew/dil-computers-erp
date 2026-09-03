@@ -133,7 +133,12 @@ export default function Quotations({ token, onLogout }) {
                             {(q.items || []).map((item, idx) => (
                               <tr key={idx}>
                                 <td style={styles.innerTd}>{item.category}</td>
-                                <td style={styles.innerTd}>{item.name}</td>
+                                <td style={styles.innerTd}>
+                                  {item.name}
+                                  {item.serialNumbers && item.serialNumbers.length > 0 && (
+                                    <div style={styles.serialsNote}>SN: {item.serialNumbers.join(', ')}</div>
+                                  )}
+                                </td>
                                 <td style={{ ...styles.innerTd, textAlign: 'right' }}>{item.quantity}</td>
                                 <td style={{ ...styles.innerTd, textAlign: 'right' }}>
                                   {formatPrice(item.catalPrice)}
@@ -272,6 +277,11 @@ const styles = {
     fontSize: 12,
     color: '#334155',
     fontWeight: 600,
+  },
+  serialsNote: {
+    marginTop: 2,
+    fontSize: 11,
+    color: '#64748b',
   },
   innerTd: {
     padding: '6px 10px',

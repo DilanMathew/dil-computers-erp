@@ -18,6 +18,7 @@ export default function useLineItemBuilder({ token, onLogout }) {
   const [quantity, setQuantity] = useState('1')
   const [finalPrice, setFinalPrice] = useState('')
   const [sameAsCatalogue, setSameAsCatalogue] = useState(false)
+  const [serialNumbersText, setSerialNumbersText] = useState('')
 
   useEffect(() => {
     apiFetch('/api/categories', token)
@@ -69,6 +70,7 @@ export default function useLineItemBuilder({ token, onLogout }) {
     setQuantity('1')
     setFinalPrice('')
     setSameAsCatalogue(false)
+    setSerialNumbersText('')
   }
 
   function handleCategoryChange(value) {
@@ -78,6 +80,7 @@ export default function useLineItemBuilder({ token, onLogout }) {
     setShowSuggestions(false)
     setFinalPrice('')
     setSameAsCatalogue(false)
+    setSerialNumbersText('')
   }
 
   function handleSelectSuggestion(product) {
@@ -86,6 +89,7 @@ export default function useLineItemBuilder({ token, onLogout }) {
     setShowSuggestions(false)
     setFinalPrice('')
     setSameAsCatalogue(false)
+    setSerialNumbersText('')
   }
 
   function handleSameAsCatalogueChange(checked) {
@@ -134,6 +138,14 @@ export default function useLineItemBuilder({ token, onLogout }) {
       }
     }
 
+    const serials = serialNumbersText
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (serials.length > 0 && serials.length !== qty) {
+      return { ok: false, message: `Enter ${qty} serial number(s) (comma-separated), or leave that field blank.` }
+    }
+
     return {
       ok: true,
       item: {
@@ -147,6 +159,7 @@ export default function useLineItemBuilder({ token, onLogout }) {
         sameAsCatalogue,
         hsnCode: selectedProduct.hsn_code || null,
         warrantyMonths: selectedProduct.warranty_months || null,
+        serialNumbers: serials.length > 0 ? serials : null,
       },
     }
   }
@@ -162,8 +175,10 @@ export default function useLineItemBuilder({ token, onLogout }) {
     quantity,
     finalPrice,
     sameAsCatalogue,
+    serialNumbersText,
     setQuantity,
     setFinalPrice,
+    setSerialNumbersText,
     setShowSuggestions,
     handleCategoryChange,
     handleSelectSuggestion,

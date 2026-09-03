@@ -71,12 +71,26 @@ logged in — a dashboard with sections scoped to your role:
   Product Catalogue (admin only).
 - **Product Catalogue** *(all roles; admin can manage)* — the original
   searchable, paginated view of the full product catalogue, now also
-  showing each product's HSN code and warranty period. Quantities reflect
-  stock reduced by invoices and increased by purchase orders. Admins can
-  click a row to set its HSN code, reorder threshold, and warranty (in
-  months — carried onto any quotation/invoice line item for that product,
-  purely informational); its last cost price is shown read-only, set
-  automatically from purchase orders.
+  showing each product's HSN code, warranty period, and barcode. The
+  search box matches a barcode as well as a name, so a USB barcode
+  scanner (which just types the code and hits enter) works as a
+  "scan to find" lookup here and in the product picker on
+  quotations/invoices. Quantities reflect stock reduced by invoices and
+  increased by purchase orders. Admins can click a row to set its HSN
+  code, reorder threshold, warranty (in months — carried onto any
+  quotation/invoice line item for that product, purely informational),
+  and barcode; its last cost price is shown read-only, set automatically
+  from purchase orders. When adding a product to a quotation or invoice,
+  an optional comma-separated **serial numbers** field captures one
+  serial per unit sold (must match the quantity exactly, or be left
+  blank) — shown alongside that line item everywhere it appears.
+- **Catalogue Import/Export** *(admin only)* — **Export** downloads the
+  full catalogue as a CSV; **Import** uploads one to bulk create/update
+  products (matched by category + name), updating only the columns
+  present in each row and leaving the rest untouched — handy for a
+  supplier's price list or a full price review in a spreadsheet. A row
+  that doesn't match an existing product is created new. Errors are
+  reported per row without aborting the rest of the import.
 - **Create Repair Ticket** *(admin, sales)* — log a device dropped off for
   repair: pick a saved customer, describe the device and the reported
   issue, and optionally note a serial number, an estimated cost, and
@@ -105,8 +119,23 @@ logged in — a dashboard with sections scoped to your role:
   An admin can't deactivate or demote their own account (so there's always
   at least one working admin).
 - **Audit Log** *(admin only)* — who created which quotation/invoice/
-  customer/user/payment/repair ticket/AMC contract and when, most recent
-  first.
+  customer/user/payment/repair ticket/AMC contract/credit note/bulk
+  import and when, most recent first.
+
+### Infrastructure & security
+
+- `GET /api/health` — unauthenticated health check (confirms the process
+  is up *and* can reach the database), for Railway or any uptime monitor.
+- Login attempts are rate-limited per IP (10 per 5-minute window) to slow
+  down password guessing. It's in-memory, so it resets on a restart and
+  doesn't share state across multiple instances — adequate for this
+  single-instance deployment, not a substitute for a real WAF at scale.
+- Basic response headers (`X-Content-Type-Options`, `X-Frame-Options`,
+  `Referrer-Policy`) and a request body size cap are set on every
+  response/request.
+- The server logs a clear warning on startup if `AUTH_SECRET` isn't set
+  (falling back to an insecure default) — check the deploy logs after a
+  first setup.
 
 ### Roles
 
@@ -200,10 +229,10 @@ the seed step on every deploy.
 **`products`** — seeded from `server/data/product_catalogue.csv` (columns:
 `category`, `Product`, `price`, `quantity`) — 9,500 rows across 19
 categories. `quantity` is live stock: invoices decrease it, purchase
-orders increase it. `hsn_code`, `reorder_threshold`, and
-`warranty_months` are set from the Product Catalogue (admin only);
-`cost_price` is set automatically from the most recent purchase order
-that received the product.
+orders increase it. `hsn_code`, `reorder_threshold`, `warranty_months`,
+and `barcode` are set from the Product Catalogue (admin only) or in bulk
+via Catalogue Import/Export; `cost_price` is set automatically from the
+most recent purchase order that received the product.
 
 | column | type |
 |---|---|
@@ -216,18 +245,20 @@ that received the product.
 | reorder_threshold | integer, nullable |
 | cost_price | numeric(10,2), nullable |
 | warranty_months | integer, nullable |
+| barcode | text, nullable |
 | created_at | timestamptz |
 
 **`quotations`** and **`invoices`** — written by `POST /api/quotations`
 and `POST /api/invoices` respectively. Each stores its line items as a
 JSONB array (category, product name, quantity, catalogue price, final
-price, HSN code, warranty months, and whether the final price matched the
-catalogue), plus `subtotal`/`gst_rate`/`gst_amount` alongside
-`grand_total` (now the tax-inclusive final total — `subtotal +
-gst_amount`). `invoices` also carries customer phone/address, payment
-method, and optional `quotation_number`/`ticket_number` references (free
-text, not foreign keys — a quotation or repair ticket can be edited or
-reused without breaking old invoices that cite it). Both carry
+price, HSN code, warranty months, optional per-unit serial numbers, and
+whether the final price matched the catalogue), plus
+`subtotal`/`gst_rate`/`gst_amount` alongside `grand_total` (now the
+tax-inclusive final total — `subtotal + gst_amount`). `invoices` also
+carries customer phone/address, payment method, and optional
+`quotation_number`/`ticket_number` references (free text, not foreign
+keys — a quotation or repair ticket can be edited or reused without
+breaking old invoices that cite it). Both carry
 `created_by_user_id`/`created_by_username` and an optional `customer_id`
 — linking a saved customer is optional either way, so a walk-in sale with
 no saved record works exactly as before.
@@ -286,7 +317,7 @@ can't drift out of sync with the payments actually on record.
 `quotation.create`, `invoice.create`, `customer.create`, `customer.update`,
 `payment.record`, `product.update`, `supplier.create`, `supplier.update`,
 `purchase_order.create`, `amc_contract.create`, `amc_contract.update`,
-`repair_ticket.create`, `repair_ticket.update`, `credit_note.create`),
-who did it, and a small JSON detail snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so
+`repair_ticket.create`, `repair_ticket.update`, `credit_note.create`,
+`product.bulk_import`), who did it, and a small JSON detail snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so
 deleting an account, if that's ever added, wouldn't take its history with
 it — `username` is kept alongside as a permanent snapshot either way.

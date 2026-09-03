@@ -1,14 +1,73 @@
 const path = require('path')
 const express = require('express')
+const { parse: parseCsv } = require('csv-parse/sync')
 const pool = require('./db/pool')
 const { ROLES, issueToken, requireAuth, requireRole, hashPassword, verifyPassword } = require('./auth')
 
 const app = express()
 const PORT = process.env.PORT || 5000
 
+// Railway (like most PaaS) puts the app behind a reverse proxy — without
+// this, req.ip is the proxy's own address for every request, which would
+// make the login rate limiter below apply globally instead of per-client.
+app.set('trust proxy', true)
+
 const SORTABLE_COLUMNS = new Set(['name', 'category', 'price', 'quantity'])
 
-app.use(express.json())
+// Cap request bodies well above the largest legitimate payload (a big
+// invoice or a bulk product import) but nowhere near unbounded.
+app.use(express.json({ limit: '2mb' }))
+
+// A handful of basic response headers — cheap, broadly applicable hardening
+// that doesn't need a dependency.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  next()
+})
+
+// Unauthenticated health check for Railway (and anyone else) to poll —
+// confirms the process is up and can actually reach the database, not
+// just that it's accepting connections.
+app.get('/api/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1')
+    res.json({ status: 'ok' })
+  } catch (err) {
+    res.status(503).json({ status: 'error', message: 'Database unavailable' })
+  }
+})
+
+// Simple in-memory sliding-window limiter for login attempts, keyed by IP.
+// Good enough for a single-instance deployment; not meant to survive a
+// restart or scale across instances. Swept periodically so it doesn't grow
+// unbounded across many distinct IPs over a long uptime.
+const LOGIN_WINDOW_MS = 5 * 60 * 1000
+const LOGIN_MAX_ATTEMPTS = 10
+const loginAttempts = new Map()
+
+function loginRateLimit(req, res, next) {
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown'
+  const now = Date.now()
+  const entry = loginAttempts.get(ip)
+  if (!entry || now - entry.windowStart > LOGIN_WINDOW_MS) {
+    loginAttempts.set(ip, { count: 1, windowStart: now })
+    return next()
+  }
+  entry.count += 1
+  if (entry.count > LOGIN_MAX_ATTEMPTS) {
+    return res.status(429).json({ message: 'Too many login attempts — please wait a few minutes and try again.' })
+  }
+  next()
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - LOGIN_WINDOW_MS
+  for (const [ip, entry] of loginAttempts) {
+    if (entry.windowStart < cutoff) loginAttempts.delete(ip)
+  }
+}, LOGIN_WINDOW_MS).unref()
 
 // Records who did what, for the admin-only audit log. Pass a transaction
 // client when logging inside a transaction so the entry commits/rolls back
@@ -61,6 +120,26 @@ function validateLineItems(rawItems, { requireProductId = false } = {}) {
       return { ok: false, message: `Invalid final price for "${name}"` }
     }
 
+    // Optional per-unit serial numbers, for traceability on serialized
+    // items (laptops, etc). If provided at all, there must be exactly one
+    // per unit sold — a partial list isn't meaningfully attributable to
+    // which units they're for, so it's rejected rather than guessed at.
+    let serialNumbers = null
+    if (raw?.serialNumbers != null) {
+      if (!Array.isArray(raw.serialNumbers)) {
+        return { ok: false, message: `Serial numbers for "${name}" must be a list` }
+      }
+      const cleaned = raw.serialNumbers
+        .map((s) => (typeof s === 'string' ? s.trim() : ''))
+        .filter(Boolean)
+      if (cleaned.length > 0) {
+        if (cleaned.length !== quantity) {
+          return { ok: false, message: `"${name}": enter ${quantity} serial number(s), or leave the field blank` }
+        }
+        serialNumbers = cleaned
+      }
+    }
+
     items.push({
       productId: Number.isInteger(productId) && productId > 0 ? productId : null,
       category,
@@ -70,6 +149,7 @@ function validateLineItems(rawItems, { requireProductId = false } = {}) {
       finalPrice,
       sameAsCatalogue: Boolean(raw?.sameAsCatalogue),
       hsnCode: typeof raw?.hsnCode === 'string' && raw.hsnCode.trim() ? raw.hsnCode.trim() : null,
+      serialNumbers,
     })
   }
 
@@ -96,7 +176,7 @@ function isValidDateString(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value))
 }
 
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', loginRateLimit, async (req, res) => {
   try {
     const { username, password } = req.body || {}
     if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
@@ -505,8 +585,10 @@ app.get('/api/products', requireAuth, async (req, res) => {
     }
 
     if (req.query.q) {
+      // Matches by name or barcode, so scanning a barcode into the same
+      // search box the product picker already uses just works.
       params.push(`%${req.query.q}%`)
-      conditions.push(`name ILIKE $${params.length}`)
+      conditions.push(`(name ILIKE $${params.length} OR barcode ILIKE $${params.length})`)
     }
 
     if (req.query.lowStock === 'true') {
@@ -524,7 +606,7 @@ app.get('/api/products', requireAuth, async (req, res) => {
     params.push(pageSize)
     params.push(offset)
     const itemsResult = await pool.query(
-      `SELECT id, category, name, price, quantity, hsn_code, reorder_threshold, cost_price, warranty_months
+      `SELECT id, category, name, price, quantity, hsn_code, reorder_threshold, cost_price, warranty_months, barcode
        FROM products
        ${where}
        ORDER BY ${sortColumn} ${sortDir}
@@ -545,8 +627,9 @@ app.get('/api/products', requireAuth, async (req, res) => {
   }
 })
 
-// Admin-only: catalogue management fields, not the product's core data
-// (name/price/quantity/category stay CSV-managed).
+// Admin-only: catalogue management fields for a single product. Bulk
+// changes to name/price/quantity/category — including via the CSV import
+// below — go through the /api/products/import route instead.
 app.patch('/api/products/:id', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10)
@@ -588,6 +671,11 @@ app.patch('/api/products/:id', requireAuth, requireRole('admin'), async (req, re
       }
       sets.push(`warranty_months = $${params.length}`)
     }
+    if ('barcode' in (req.body || {})) {
+      const v = typeof req.body.barcode === 'string' && req.body.barcode.trim() ? req.body.barcode.trim() : null
+      params.push(v)
+      sets.push(`barcode = $${params.length}`)
+    }
 
     if (sets.length === 0) {
       return res.status(400).json({ message: 'Nothing to update' })
@@ -596,7 +684,7 @@ app.patch('/api/products/:id', requireAuth, requireRole('admin'), async (req, re
     params.push(id)
     const { rows } = await pool.query(
       `UPDATE products SET ${sets.join(', ')} WHERE id = $${params.length}
-       RETURNING id, category, name, price, quantity, hsn_code, reorder_threshold, cost_price, warranty_months`,
+       RETURNING id, category, name, price, quantity, hsn_code, reorder_threshold, cost_price, warranty_months, barcode`,
       params
     )
     if (rows.length === 0) {
@@ -615,6 +703,160 @@ app.patch('/api/products/:id', requireAuth, requireRole('admin'), async (req, re
   } catch (err) {
     console.error('PATCH /api/products/:id failed:', err)
     res.status(500).json({ message: 'Could not update product' })
+  }
+})
+
+function csvEscape(value) {
+  if (value === null || value === undefined) return ''
+  const str = String(value)
+  if (/[",\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`
+  }
+  return str
+}
+
+function toCsv(rows, columns) {
+  const header = columns.join(',')
+  const lines = rows.map((row) => columns.map((col) => csvEscape(row[col])).join(','))
+  return [header, ...lines].join('\n')
+}
+
+const PRODUCT_CSV_COLUMNS = [
+  'category', 'name', 'price', 'quantity', 'hsn_code', 'reorder_threshold', 'cost_price', 'warranty_months', 'barcode',
+]
+
+// Full-catalogue CSV, in the same column shape POST /api/products/import
+// expects back — round-trips cleanly (export, edit prices in a
+// spreadsheet, re-import).
+app.get('/api/products/export', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT category, name, price, quantity, hsn_code, reorder_threshold, cost_price, warranty_months, barcode
+       FROM products ORDER BY category, name`
+    )
+    const csv = toCsv(rows, PRODUCT_CSV_COLUMNS)
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    res.setHeader('Content-Disposition', 'attachment; filename="product_catalogue_export.csv"')
+    res.send(csv)
+  } catch (err) {
+    console.error('GET /api/products/export failed:', err)
+    res.status(500).json({ message: 'Could not export catalogue' })
+  }
+})
+
+const PRODUCT_IMPORT_MAX_ROWS = 5000
+
+// Bulk create/update from a CSV upload — matches existing products by
+// (category, name) and updates only the columns present in each row,
+// leaving the rest untouched; a row that doesn't match an existing
+// product is inserted as new (needs at least price and quantity). Row
+// errors don't abort the whole import — every other row still gets
+// processed, and the response reports what happened per row so a
+// multi-thousand-row import doesn't live or die on one bad line.
+app.post('/api/products/import', requireAuth, requireRole('admin'), express.text({ type: '*/*', limit: '10mb' }), async (req, res) => {
+  try {
+    const raw = typeof req.body === 'string' ? req.body : ''
+    if (!raw.trim()) {
+      return res.status(400).json({ message: 'Upload a non-empty CSV file' })
+    }
+
+    let records
+    try {
+      records = parseCsv(raw, { columns: true, skip_empty_lines: true, trim: true })
+    } catch (err) {
+      return res.status(400).json({ message: `Could not parse CSV: ${err.message}` })
+    }
+    if (records.length === 0) {
+      return res.status(400).json({ message: 'No rows found in that CSV' })
+    }
+    if (records.length > PRODUCT_IMPORT_MAX_ROWS) {
+      return res.status(400).json({
+        message: `That's ${records.length} rows — split imports into batches of ${PRODUCT_IMPORT_MAX_ROWS} or fewer.`,
+      })
+    }
+
+    let created = 0
+    let updated = 0
+    const errors = []
+
+    for (let i = 0; i < records.length; i++) {
+      const row = records[i]
+      const rowNum = i + 2 // +1 for 1-indexing, +1 for the header row
+      const category = typeof row.category === 'string' ? row.category.trim() : ''
+      const name = typeof row.name === 'string' ? row.name.trim() : ''
+      if (!category || !name) {
+        errors.push(`Row ${rowNum}: category and name are required`)
+        continue
+      }
+
+      const fields = {}
+      let rowError = null
+      const numericField = (key, column, { integer = false } = {}) => {
+        if (row[key] === undefined || row[key] === '') return
+        const n = integer ? parseInt(row[key], 10) : Number(row[key])
+        if (!Number.isFinite(n) || n < 0 || (integer && !Number.isInteger(n))) {
+          rowError = `Row ${rowNum}: invalid ${key}`
+          return
+        }
+        fields[column] = n
+      }
+      numericField('price', 'price')
+      numericField('quantity', 'quantity', { integer: true })
+      numericField('reorder_threshold', 'reorder_threshold', { integer: true })
+      numericField('cost_price', 'cost_price')
+      numericField('warranty_months', 'warranty_months', { integer: true })
+      if (rowError) {
+        errors.push(rowError)
+        continue
+      }
+      if (row.hsn_code) fields.hsn_code = String(row.hsn_code).trim()
+      if (row.barcode) fields.barcode = String(row.barcode).trim()
+
+      try {
+        const { rows: existing } = await pool.query(
+          'SELECT id FROM products WHERE category = $1 AND name = $2',
+          [category, name]
+        )
+
+        if (existing.length > 0) {
+          const setCols = Object.keys(fields)
+          if (setCols.length === 0) continue
+          const setSql = setCols.map((c, idx) => `${c} = $${idx + 1}`).join(', ')
+          const params = setCols.map((c) => fields[c])
+          params.push(existing[0].id)
+          await pool.query(`UPDATE products SET ${setSql} WHERE id = $${params.length}`, params)
+          updated++
+        } else {
+          if (fields.price === undefined || fields.quantity === undefined) {
+            errors.push(`Row ${rowNum}: new product "${name}" needs both price and quantity`)
+            continue
+          }
+          await pool.query(
+            `INSERT INTO products (category, name, price, quantity, hsn_code, reorder_threshold, cost_price, warranty_months, barcode)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [
+              category, name, fields.price, fields.quantity,
+              fields.hsn_code || null, fields.reorder_threshold ?? null,
+              fields.cost_price ?? null, fields.warranty_months ?? null, fields.barcode || null,
+            ]
+          )
+          created++
+        }
+      } catch (err) {
+        errors.push(`Row ${rowNum}: ${err.message}`)
+      }
+    }
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'product.bulk_import',
+      details: { totalRows: records.length, created, updated, errorCount: errors.length },
+    })
+
+    res.json({ totalRows: records.length, created, updated, errorCount: errors.length, errors: errors.slice(0, 50) })
+  } catch (err) {
+    console.error('POST /api/products/import failed:', err)
+    res.status(500).json({ message: 'Could not import catalogue' })
   }
 })
 

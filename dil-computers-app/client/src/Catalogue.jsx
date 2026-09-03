@@ -8,6 +8,7 @@ function ProductManageRow({ token, onLogout, product, onSaved }) {
   const [reorderThreshold, setReorderThreshold] = useState(product.reorder_threshold ?? '')
   const [hsnCode, setHsnCode] = useState(product.hsn_code || '')
   const [warrantyMonths, setWarrantyMonths] = useState(product.warranty_months ?? '')
+  const [barcode, setBarcode] = useState(product.barcode || '')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -22,6 +23,7 @@ function ProductManageRow({ token, onLogout, product, onSaved }) {
           reorderThreshold: reorderThreshold === '' ? null : reorderThreshold,
           hsnCode,
           warrantyMonths: warrantyMonths === '' ? null : warrantyMonths,
+          barcode,
         }),
       })
       onSaved()
@@ -71,6 +73,16 @@ function ProductManageRow({ token, onLogout, product, onSaved }) {
           placeholder="Not set"
           value={warrantyMonths}
           onChange={(e) => setWarrantyMonths(e.target.value)}
+        />
+      </div>
+      <div>
+        <label style={styles.manageLabel}>Barcode</label>
+        <input
+          style={styles.manageInput}
+          type="text"
+          placeholder="Not set — scan or type"
+          value={barcode}
+          onChange={(e) => setBarcode(e.target.value)}
         />
       </div>
       <div style={styles.manageActions}>
@@ -172,7 +184,7 @@ export default function Catalogue({ token, user, onLogout }) {
           <input
             style={styles.search}
             type="text"
-            placeholder="Search products…"
+            placeholder="Search products, or scan a barcode…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
