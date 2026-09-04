@@ -273,6 +273,103 @@ app.get('/api/next-document-number', requireAuth, async (req, res) => {
   }
 })
 
+// GST summary for a period, for filing. Sales are stored with one GST rate
+// per document, so this groups by that rate to give the taxable value and
+// tax for each slab, then subtracts credit notes (returns) to leave the net
+// liability.
+//
+// This is the OUTWARD side only. Purchase orders record no GST at all —
+// just a grand total — so input tax credit genuinely cannot be computed
+// from what is stored, and is left out rather than shown as zero, which
+// would read as "no input credit" instead of "not tracked".
+//
+// Credit notes carry no date of their own, so they are matched to a period
+// by when they were recorded (created_at). Invoices use invoice_date.
+app.get('/api/gst-summary', requireAuth, requireRole('admin', 'accountant'), async (req, res) => {
+  try {
+    const { from, to } = req.query
+    if (!isValidDateString(from) || !isValidDateString(to)) {
+      return res.status(400).json({ message: 'A valid from and to date (YYYY-MM-DD) are required' })
+    }
+    if (to < from) {
+      return res.status(400).json({ message: 'The "to" date cannot be before the "from" date' })
+    }
+
+    const { rows: salesRows } = await pool.query(
+      `SELECT gst_rate::float AS rate,
+              COUNT(*)::int AS document_count,
+              SUM(subtotal)::float AS taxable_value,
+              SUM(gst_amount)::float AS tax_amount,
+              SUM(grand_total)::float AS total
+         FROM invoices
+        WHERE invoice_date >= $1 AND invoice_date <= $2
+        GROUP BY gst_rate
+        ORDER BY gst_rate ASC`,
+      [from, to]
+    )
+
+    const { rows: creditRows } = await pool.query(
+      `SELECT gst_rate::float AS rate,
+              COUNT(*)::int AS document_count,
+              SUM(subtotal)::float AS taxable_value,
+              SUM(gst_amount)::float AS tax_amount,
+              SUM(grand_total)::float AS total
+         FROM credit_notes
+        WHERE created_at >= $1::date AND created_at < ($2::date + INTERVAL '1 day')
+        GROUP BY gst_rate
+        ORDER BY gst_rate ASC`,
+      [from, to]
+    )
+
+    const round = (n) => Math.round((n + Number.EPSILON) * 100) / 100
+    const sumOf = (rows) => rows.reduce(
+      (acc, r) => ({
+        documentCount: acc.documentCount + r.document_count,
+        taxableValue: round(acc.taxableValue + r.taxable_value),
+        taxAmount: round(acc.taxAmount + r.tax_amount),
+        total: round(acc.total + r.total),
+      }),
+      { documentCount: 0, taxableValue: 0, taxAmount: 0, total: 0 }
+    )
+
+    // Net per slab: sales minus returns, keyed by rate so a slab that only
+    // appears on one side still shows up.
+    const byRate = new Map()
+    for (const r of salesRows) {
+      byRate.set(r.rate, { rate: r.rate, taxableValue: r.taxable_value, taxAmount: r.tax_amount, total: r.total })
+    }
+    for (const r of creditRows) {
+      const existing = byRate.get(r.rate) || { rate: r.rate, taxableValue: 0, taxAmount: 0, total: 0 }
+      byRate.set(r.rate, {
+        rate: r.rate,
+        taxableValue: round(existing.taxableValue - r.taxable_value),
+        taxAmount: round(existing.taxAmount - r.tax_amount),
+        total: round(existing.total - r.total),
+      })
+    }
+    const net = [...byRate.values()].sort((a, b) => a.rate - b.rate)
+
+    res.json({
+      from,
+      to,
+      sales: { byRate: salesRows, totals: sumOf(salesRows) },
+      creditNotes: { byRate: creditRows, totals: sumOf(creditRows) },
+      net,
+      netTotals: net.reduce(
+        (acc, r) => ({
+          taxableValue: round(acc.taxableValue + r.taxableValue),
+          taxAmount: round(acc.taxAmount + r.taxAmount),
+          total: round(acc.total + r.total),
+        }),
+        { taxableValue: 0, taxAmount: 0, total: 0 }
+      ),
+    })
+  } catch (err) {
+    console.error('GET /api/gst-summary failed:', err)
+    res.status(500).json({ message: 'Could not build the GST summary' })
+  }
+})
+
 // Receivables aging: every invoice still owing money, bucketed by how far
 // past its due date it is. An invoice with no due date was due on receipt,
 // so its invoice date stands in — which means a cash sale that was never
