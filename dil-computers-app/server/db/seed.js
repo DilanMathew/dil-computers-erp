@@ -202,6 +202,21 @@ async function ensureDocumentNumberUniqueness(client) {
   }
 }
 
+// Serial-number lookup (GET /api/serial-lookup) finds a sale by matching
+// inside invoices.items, which without an index means reading every
+// invoice. A GIN index makes that containment search stay fast as invoices
+// pile up. jsonb_path_ops is the smaller, faster variant and supports the
+// @> operator, which is all this lookup uses.
+async function ensureInvoiceItemsIndex(client) {
+  const { rows } = await client.query(
+    `SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'invoices_items_gin'`
+  )
+  if (rows.length > 0) return
+
+  await client.query(`CREATE INDEX invoices_items_gin ON invoices USING GIN (items jsonb_path_ops)`)
+  console.log('Added GIN index on invoices.items (serial-number lookup).')
+}
+
 // --- Temporary demo data for trying out Customer Insights against the
 // live app. Guarded by env vars so it never runs by default; every row it
 // creates is unmistakably prefixed "[TEST] " so it's easy to spot and
@@ -429,6 +444,7 @@ async function main() {
     await ensureDefaultStaffAccount(client)
     await ensureDefaultTechnicianAccounts(client)
     await ensureDocumentNumberUniqueness(client)
+    await ensureInvoiceItemsIndex(client)
 
     if (process.env.CLEANUP_SAMPLE_DATA === 'true') {
       await cleanupSampleCustomerData(client)

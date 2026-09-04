@@ -98,8 +98,9 @@ only the sections your role can use:
   "scan to find" lookup here and in the product picker on
   quotations/invoices. Quantities reflect stock reduced by invoices and
   increased by purchase orders. Admins can click a row to set its HSN
-  code, reorder threshold, warranty (in months — carried onto any
-  quotation/invoice line item for that product, purely informational),
+  code, reorder threshold, warranty (in months — held on the product, not
+  copied onto the line items of a sale, so Warranty Lookup reads the
+  current value rather than what it was when the item sold),
   and barcode; its last cost price is shown read-only, set automatically
   from purchase orders. When adding a product to a quotation or invoice,
   an optional comma-separated **serial numbers** field captures one
@@ -135,6 +136,20 @@ only the sections your role can use:
   can't drift). An expandable row shows contract details, every repair
   ticket linked to it, and (admin/sales) editing to extend the end date,
   adjust the amount, or cancel the contract.
+- **Warranty Lookup** *(admin, sales, accountant)* — scan or type a serial
+  number to see the sale it came from (invoice, date, customer, phone),
+  whether it's still under warranty, and any repair tickets recorded
+  against the same serial. Built entirely from data already captured:
+  the per-unit serials entered on an invoice line, the product's
+  warranty period, and repair tickets' serial numbers. The search box
+  takes an Enter keypress, so a USB barcode scanner works directly.
+  Matching is exact first (index-backed) and falls back to
+  case-insensitive, since a serial read off a label by hand often differs
+  in case from how it was typed at the till. Two caveats worth knowing:
+  a serial is only findable if it was entered on the invoice line at the
+  time of sale, and the warranty length shown is the product's *current*
+  catalogue setting — the sale doesn't record what it was at the time, so
+  changing a product's warranty changes what past sales report.
 - **Staff Monitoring** *(admin, accountant)* — the HR roster: total staff
   count, each person's position, salary, and earned leave balance
   (a plain stored balance, admin-adjustable — not a full accrual/request

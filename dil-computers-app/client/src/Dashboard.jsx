@@ -23,6 +23,7 @@ import StaffMonitoring from './StaffMonitoring'
 import PayrollCompensation from './PayrollCompensation'
 import CustomerInsights from './CustomerInsights'
 import TechnicianJobs from './TechnicianJobs'
+import WarrantyLookup from './WarrantyLookup'
 
 // Which roles see each tab, grouped for the sidebar. 'staff' is
 // deliberately narrow — create-only access to quotations and purchase
@@ -59,6 +60,7 @@ const TABS = [
   { id: 'repairTickets', label: 'Repair Tickets', group: 'Service', roles: ['admin', 'sales', 'accountant'], Component: RepairTickets },
   { id: 'amcContract', label: 'Create AMC Contract', group: 'Service', roles: ['admin', 'sales'], Component: CreateAmcContract },
   { id: 'amcContracts', label: 'AMC Contracts', group: 'Service', roles: ['admin', 'sales', 'accountant'], Component: AmcContracts },
+  { id: 'warrantyLookup', label: 'Warranty Lookup', group: 'Service', roles: ['admin', 'sales', 'accountant'], Component: WarrantyLookup },
 
   { id: 'staffMonitoring', label: 'Staff Monitoring', group: 'HR', roles: ['admin', 'accountant'], Component: StaffMonitoring },
   { id: 'payroll', label: 'Payroll & Compensation', group: 'HR', roles: ['admin', 'accountant'], Component: PayrollCompensation },
