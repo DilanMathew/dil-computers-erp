@@ -1743,9 +1743,10 @@ app.get('/api/repair-tickets/:id', requireAuth, requireRole('admin', 'sales', 'a
 })
 
 app.post('/api/repair-tickets', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+  const client = await pool.connect()
   try {
     const {
-      ticketNumber, customerId, deviceDescription, serialNumber, reportedIssue,
+      ticketNumber, customerId, newCustomer, deviceDescription, serialNumber, reportedIssue,
       estimatedCost, receivedDate, amcContractId, assignedToUsername,
     } = req.body || {}
 
@@ -1753,10 +1754,21 @@ app.post('/api/repair-tickets', requireAuth, requireRole('admin', 'sales'), asyn
     if (!number) {
       return res.status(400).json({ message: 'Ticket number is required' })
     }
-    const custId = parseInt(customerId, 10)
-    if (!Number.isInteger(custId)) {
-      return res.status(400).json({ message: 'A customer is required' })
+
+    // A service call often comes from someone who isn't on file yet, so the
+    // caller may either reference a saved customer or hand us a brand new one
+    // to save. Either way the ticket ends up linked to a real customer row —
+    // created below in the same transaction as the ticket, so a failed ticket
+    // insert can't leave a stray customer behind.
+    const newCustomerName = typeof newCustomer?.name === 'string' ? newCustomer.name.trim() : ''
+    let custId = null
+    if (!newCustomerName) {
+      custId = parseInt(customerId, 10)
+      if (!Number.isInteger(custId)) {
+        return res.status(400).json({ message: 'Pick a saved customer or enter a new customer name' })
+      }
     }
+
     const device = typeof deviceDescription === 'string' ? deviceDescription.trim() : ''
     if (!device) {
       return res.status(400).json({ message: 'Device description is required' })
@@ -1786,7 +1798,24 @@ app.post('/api/repair-tickets', requireAuth, requireRole('admin', 'sales'), asyn
 
     const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
 
-    const { rows } = await pool.query(
+    await client.query('BEGIN')
+
+    let createdCustomer = null
+    if (newCustomerName) {
+      const { rows: custRows } = await client.query(
+        `INSERT INTO customers (name, phone, email, address, notes, created_by_user_id, created_by_username)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, name, phone, email, address, notes, created_by_username, created_at`,
+        [
+          newCustomerName, clean(newCustomer.phone), clean(newCustomer.email),
+          clean(newCustomer.address), clean(newCustomer.notes), req.user.id, req.user.username,
+        ]
+      )
+      createdCustomer = custRows[0]
+      custId = createdCustomer.id
+    }
+
+    const { rows } = await client.query(
       `INSERT INTO repair_tickets
          (ticket_number, customer_id, device_description, serial_number, reported_issue,
           estimated_cost, received_date, amc_contract_id, assigned_to_username,
@@ -1802,21 +1831,35 @@ app.post('/api/repair-tickets', requireAuth, requireRole('admin', 'sales'), asyn
     )
     const ticket = rows[0]
 
+    await client.query('COMMIT')
+
+    if (createdCustomer) {
+      await logAudit(pool, {
+        user: req.user,
+        action: 'customer.create',
+        entityType: 'customer',
+        entityId: createdCustomer.id,
+        details: { name: createdCustomer.name, via: 'repair_ticket' },
+      })
+    }
     await logAudit(pool, {
       user: req.user,
       action: 'repair_ticket.create',
       entityType: 'repair_ticket',
       entityId: ticket.id,
-      details: { ticketNumber: number, customerId: custId },
+      details: { ticketNumber: number, customerId: custId, newCustomer: Boolean(createdCustomer) },
     })
 
-    res.status(201).json({ ticket })
+    res.status(201).json({ ticket, customer: createdCustomer })
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
     if (err.code === '23503') {
       return res.status(400).json({ message: 'That customer or AMC contract no longer exists' })
     }
     console.error('POST /api/repair-tickets failed:', err)
     res.status(500).json({ message: 'Could not create repair ticket' })
+  } finally {
+    client.release()
   }
 })
 

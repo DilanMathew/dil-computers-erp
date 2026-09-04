@@ -233,6 +233,16 @@ Ticket** or **Repair Tickets** (a dropdown fed by
 `GET /api/technicians`, admin/sales only — the account list `users`
 doesn't need to be exposed just to populate this).
 
+A service call often comes from someone who isn't on file yet, so
+**Create Repair Ticket** doesn't require a saved customer: type a name
+the search doesn't match and a panel appears for their phone and
+address, and that customer is created alongside the ticket (one
+transaction — see `repair_tickets` below). The address matters here
+because it's what the technician opens in Maps, so it's offered up front
+rather than left for someone to fill in later. Next time that customer
+is typed they show up in the search like any other, so repeat callers
+don't pile up duplicates.
+
 ### First login
 
 A bootstrap `admin` account is created automatically the first time the
@@ -377,7 +387,12 @@ that's the only status actually stored as a boolean.
 
 **`repair_tickets`** — service tickets for devices dropped off for
 repair, written by `POST /api/repair-tickets`. Links to a saved
-`customer_id` (required) and, optionally, an `amc_contract_id` if the
+`customer_id` (required — but the caller doesn't have to pick an
+existing one: passing a `newCustomer` object instead creates that
+customer and the ticket in a single transaction, so a first-time service
+call can be logged without a separate trip to the Customers section, and
+a failed ticket insert can't leave a stray customer behind) and,
+optionally, an `amc_contract_id` if the
 repair is covered under a contract, and an `assigned_to_username` (a
 technician's login — see "On-site field service" above). `status` moves
 through `received` → `diagnosing` → `waiting_for_parts` → `in_repair` →
