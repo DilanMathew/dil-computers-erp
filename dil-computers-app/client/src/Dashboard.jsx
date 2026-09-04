@@ -25,6 +25,7 @@ import CustomerInsights from './CustomerInsights'
 import TechnicianJobs from './TechnicianJobs'
 import WarrantyLookup from './WarrantyLookup'
 import Receivables from './Receivables'
+import GstSummary from './GstSummary'
 
 // Which roles see each tab, grouped for the sidebar. 'staff' is
 // deliberately narrow — create-only access to quotations and purchase
@@ -68,6 +69,7 @@ const TABS = [
   { id: 'payroll', label: 'Payroll & Compensation', group: 'HR', roles: ['admin', 'accountant'], Component: PayrollCompensation },
 
   { id: 'users', label: 'Users', group: 'Admin', roles: ['admin'], Component: Users },
+  { id: 'gstSummary', label: 'GST Summary', group: 'Insights', roles: ['admin', 'accountant'], Component: GstSummary },
   { id: 'audit', label: 'Audit Log', group: 'Admin', roles: ['admin'], Component: AuditLog },
 ]
 

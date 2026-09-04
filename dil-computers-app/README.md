@@ -31,6 +31,15 @@ only the sections your role can use:
   here is a separately stored total that could drift. "Late" is measured
   against each invoice's own due date, taken from the customer's agreed
   credit terms when it was issued.
+- **GST Summary** *(admin, accountant)* — taxable value and tax by rate
+  slab for a chosen month, with credit notes deducted to give the net,
+  plus a CSV download — the figures behind a filing without totalling
+  invoices by hand. **Sales side only:** purchase orders record no GST
+  (just a total), so input tax credit cannot be computed from what's
+  stored and is left out entirely rather than shown as zero, which would
+  read as "no input credit" instead of "not tracked". Credit notes carry
+  no date of their own, so they count in the month they were recorded.
+  Check the figures against your own records before filing.
 - **Create Quotation** *(admin, sales)* — pick a product category, search
   for a product by name, and set a quantity; the catalogue price
   auto-populates. Final price starts empty — tick "Same as catalogue price"
