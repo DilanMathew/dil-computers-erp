@@ -182,6 +182,85 @@ function isValidDateString(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value))
 }
 
+// Document numbers are unique per document type (indexes added in
+// server/db/seed.js). Turn that database error into something the user can
+// act on — the number is theirs to change — instead of a generic 500.
+const DUPLICATE_NUMBER_LABELS = {
+  quotations_quotation_number_unique: 'quotation number',
+  invoices_invoice_number_unique: 'invoice number',
+  purchase_orders_po_number_unique: 'PO number',
+  amc_contracts_contract_number_unique: 'contract number',
+  repair_tickets_ticket_number_unique: 'ticket number',
+  credit_notes_credit_note_number_unique: 'credit note number',
+}
+
+function duplicateNumberMessage(err) {
+  if (err?.code !== '23505') return null
+  const label = DUPLICATE_NUMBER_LABELS[err.constraint]
+  return label ? `That ${label} is already in use — change it and try again.` : null
+}
+
+// Which table/column each document prefix numbers live in, for handing out
+// a number that isn't taken yet (see /api/next-document-number).
+const DOCUMENT_NUMBER_SOURCES = {
+  Q: ['quotations', 'quotation_number'],
+  INV: ['invoices', 'invoice_number'],
+  PO: ['purchase_orders', 'po_number'],
+  AMC: ['amc_contracts', 'contract_number'],
+  TKT: ['repair_tickets', 'ticket_number'],
+  CN: ['credit_notes', 'credit_note_number'],
+}
+
+// The client used to pick a number with a bare 4-digit random suffix, which
+// collides far more often than it looks: ~9,000 possibilities a day means a
+// busy day of invoicing has a real chance of hitting the same number twice
+// (birthday paradox), and those numbers are now unique-indexed. So the
+// number comes from here instead, checked against what's already stored.
+//
+// This narrows the window rather than closing it — two people could still
+// be handed the same number at the same moment — so the unique index stays
+// the actual guarantee and the create routes return a clear 409 if it trips.
+//
+// Table/column names come only from the constant map above, never user input.
+app.get('/api/next-document-number', requireAuth, async (req, res) => {
+  try {
+    const prefix = typeof req.query.prefix === 'string' ? req.query.prefix : ''
+    const source = DOCUMENT_NUMBER_SOURCES[prefix]
+    if (!source) {
+      return res.status(400).json({ message: 'Unknown document type' })
+    }
+    const [table, column] = source
+
+    const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    const { rows } = await pool.query(
+      `SELECT ${column} AS value FROM ${table} WHERE ${column} LIKE $1`,
+      [`${prefix}-${datePart}-%`]
+    )
+    const taken = new Set(rows.map((r) => r.value))
+
+    // Widen the random range as the day fills up so a busy day doesn't turn
+    // into a long scan for a free number.
+    const span = Math.max(9000, taken.size * 20)
+    let number = null
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const candidate = `${prefix}-${datePart}-${Math.floor(1000 + Math.random() * span)}`
+      if (!taken.has(candidate)) {
+        number = candidate
+        break
+      }
+    }
+    if (!number) {
+      // Astronomically unlikely, but never hand back a number we know is taken.
+      number = `${prefix}-${datePart}-${Date.now().toString().slice(-6)}`
+    }
+
+    res.json({ number })
+  } catch (err) {
+    console.error('GET /api/next-document-number failed:', err)
+    res.status(500).json({ message: 'Could not generate a document number' })
+  }
+})
+
 app.post('/api/login', loginRateLimit, async (req, res) => {
   try {
     const { username, password } = req.body || {}
@@ -1367,6 +1446,10 @@ app.post('/api/purchase-orders', requireAuth, requireRole('admin', 'sales', 'sta
     if (err.code === '23503') {
       return res.status(400).json({ message: 'That supplier no longer exists' })
     }
+    const duplicate = duplicateNumberMessage(err)
+    if (duplicate) {
+      return res.status(409).json({ message: duplicate })
+    }
     console.error('POST /api/purchase-orders failed:', err)
     res.status(500).json({ message: 'Could not save purchase order' })
   } finally {
@@ -1563,6 +1646,10 @@ app.post('/api/amc-contracts', requireAuth, requireRole('admin', 'sales'), async
   } catch (err) {
     if (err.code === '23503') {
       return res.status(400).json({ message: 'That customer no longer exists' })
+    }
+    const duplicate = duplicateNumberMessage(err)
+    if (duplicate) {
+      return res.status(409).json({ message: duplicate })
     }
     console.error('POST /api/amc-contracts failed:', err)
     res.status(500).json({ message: 'Could not create contract' })
@@ -1855,6 +1942,10 @@ app.post('/api/repair-tickets', requireAuth, requireRole('admin', 'sales'), asyn
     await client.query('ROLLBACK').catch(() => {})
     if (err.code === '23503') {
       return res.status(400).json({ message: 'That customer or AMC contract no longer exists' })
+    }
+    const duplicate = duplicateNumberMessage(err)
+    if (duplicate) {
+      return res.status(409).json({ message: duplicate })
     }
     console.error('POST /api/repair-tickets failed:', err)
     res.status(500).json({ message: 'Could not create repair ticket' })
@@ -2223,6 +2314,10 @@ app.post('/api/quotations', requireAuth, requireRole('admin', 'sales', 'staff'),
     if (err.code === '23503') {
       return res.status(400).json({ message: 'That customer no longer exists' })
     }
+    const duplicate = duplicateNumberMessage(err)
+    if (duplicate) {
+      return res.status(409).json({ message: duplicate })
+    }
     console.error('POST /api/quotations failed:', err)
     res.status(500).json({ message: 'Could not save quotation' })
   }
@@ -2406,6 +2501,10 @@ app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req
     await client.query('ROLLBACK').catch(() => {})
     if (err.code === '23503') {
       return res.status(400).json({ message: 'That customer no longer exists' })
+    }
+    const duplicate = duplicateNumberMessage(err)
+    if (duplicate) {
+      return res.status(409).json({ message: duplicate })
     }
     console.error('POST /api/invoices failed:', err)
     res.status(500).json({ message: 'Could not save invoice' })
@@ -2715,6 +2814,10 @@ app.post('/api/credit-notes', requireAuth, requireRole('admin', 'sales'), async 
     res.status(201).json({ creditNote })
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
+    const duplicate = duplicateNumberMessage(err)
+    if (duplicate) {
+      return res.status(409).json({ message: duplicate })
+    }
     console.error('POST /api/credit-notes failed:', err)
     res.status(500).json({ message: 'Could not save credit note' })
   } finally {

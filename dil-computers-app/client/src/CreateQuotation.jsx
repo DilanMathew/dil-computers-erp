@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { apiFetch, AuthError } from './api'
 import { formatPrice, GST_RATES, computeGstTotals } from './format'
-import { buildDocumentPdf, generateDocumentNumber, todayIso } from './documentPdf'
+import { buildDocumentPdf, todayIso } from './documentPdf'
+import useDocumentNumber from './useDocumentNumber'
 import useLineItemBuilder from './useLineItemBuilder'
 import useCompanyInfo from './useCompanyInfo'
 import ProductPicker from './ProductPicker'
@@ -9,7 +10,7 @@ import LineItemsTable from './LineItemsTable'
 import CustomerPicker from './CustomerPicker'
 
 export default function CreateQuotation({ token, onLogout }) {
-  const [quotationNumber, setQuotationNumber] = useState(() => generateDocumentNumber('Q'))
+  const [quotationNumber, setQuotationNumber, refreshQuotationNumber] = useDocumentNumber('Q', token)
   const [quotationDate, setQuotationDate] = useState(todayIso)
   const [customerName, setCustomerName] = useState('')
   const [customerId, setCustomerId] = useState(null)
@@ -85,7 +86,7 @@ export default function CreateQuotation({ token, onLogout }) {
       setLineItems([])
       setCustomerName('')
       setCustomerId(null)
-      setQuotationNumber(generateDocumentNumber('Q'))
+      refreshQuotationNumber()
       setQuotationDate(todayIso())
     } catch (err) {
       if (err instanceof AuthError) {

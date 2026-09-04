@@ -143,6 +143,65 @@ async function ensureDefaultTechnicianAccounts(client) {
   }
 }
 
+// A document's own number identifies it — two invoices sharing one is an
+// accounting problem, not just untidiness — so each gets a unique index.
+//
+// Only a document's OWN number is listed here. The free-text *references*
+// to other documents (invoices.quotation_number, invoices.ticket_number,
+// repair_tickets.invoice_number, credit_notes.invoice_number) are
+// deliberately left out: those repeat by design, since several documents
+// can point at the same invoice or quotation.
+const UNIQUE_DOCUMENT_NUMBERS = [
+  ['quotations', 'quotation_number'],
+  ['invoices', 'invoice_number'],
+  ['purchase_orders', 'po_number'],
+  ['amc_contracts', 'contract_number'],
+  ['repair_tickets', 'ticket_number'],
+  ['credit_notes', 'credit_note_number'],
+]
+
+// Adds those indexes where the data allows it. A database that already
+// contains duplicates can't take the index, and renumbering existing
+// financial documents automatically would be the wrong call to make on
+// someone's behalf — so this reports what it found and moves on, leaving
+// the deploy healthy and the decision to a person.
+//
+// The table/column names interpolated below come only from the constant
+// list above, never from user input.
+async function ensureDocumentNumberUniqueness(client) {
+  for (const [table, column] of UNIQUE_DOCUMENT_NUMBERS) {
+    const indexName = `${table}_${column}_unique`
+
+    const { rows: existing } = await client.query(
+      `SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`,
+      [indexName]
+    )
+    if (existing.length > 0) continue
+
+    const { rows: duplicates } = await client.query(
+      `SELECT ${column} AS value, COUNT(*)::int AS count
+         FROM ${table}
+        WHERE ${column} IS NOT NULL
+        GROUP BY ${column}
+       HAVING COUNT(*) > 1
+        ORDER BY COUNT(*) DESC, ${column} ASC
+        LIMIT 10`
+    )
+
+    if (duplicates.length > 0) {
+      const summary = duplicates.map((d) => `"${d.value}" ×${d.count}`).join(', ')
+      console.warn(
+        `WARNING: ${table}.${column} has duplicate values, so its unique index was NOT created: ${summary}. ` +
+        `Resolve these (renumber the later document of each pair) and the index will be added on the next deploy.`
+      )
+      continue
+    }
+
+    await client.query(`CREATE UNIQUE INDEX ${indexName} ON ${table} (${column})`)
+    console.log(`Added unique index on ${table}.${column}.`)
+  }
+}
+
 // --- Temporary demo data for trying out Customer Insights against the
 // live app. Guarded by env vars so it never runs by default; every row it
 // creates is unmistakably prefixed "[TEST] " so it's easy to spot and
@@ -369,6 +428,7 @@ async function main() {
     await ensureBootstrapAdmin(client)
     await ensureDefaultStaffAccount(client)
     await ensureDefaultTechnicianAccounts(client)
+    await ensureDocumentNumberUniqueness(client)
 
     if (process.env.CLEANUP_SAMPLE_DATA === 'true') {
       await cleanupSampleCustomerData(client)
