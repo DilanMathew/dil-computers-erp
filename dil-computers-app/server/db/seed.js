@@ -217,6 +217,137 @@ async function ensureInvoiceItemsIndex(client) {
   console.log('Added GIN index on invoices.items (serial-number lookup).')
 }
 
+// One-time import of real April 2026 sales, from a Tally "Sales - GST
+// Register" export (server/data/april_2026_sales.csv). Each row is one
+// voucher's total — there is no product-level detail or tax split in a
+// Tally register, so this records a single line item per invoice (the
+// voucher's category) rather than pretending to know what was sold, and
+// GST is backed out of the total at a flat 18% (confirmed with the user —
+// the source data doesn't state a rate, and this app never guesses one).
+//
+// Idempotent per voucher number, so a re-run (e.g. a redeploy after this
+// has already applied) only inserts rows that aren't there yet — safe to
+// leave wired into every deploy rather than gating behind an env var.
+//
+// Deliberately bypasses the live POST /api/invoices flow: that route
+// requires every line item to reference a real catalogue product and
+// decrements its stock, which would be wrong here — these are historical,
+// already-completed sales with no per-unit inventory movement to model,
+// and decrementing a placeholder product's stock 128 times would corrupt
+// real inventory for no reason.
+const APRIL_SALES_CSV_PATH = path.join(__dirname, '..', 'data', 'april_2026_sales.csv')
+const APRIL_SALES_GST_RATE = 18
+
+async function importAprilSales(client) {
+  if (!fs.existsSync(APRIL_SALES_CSV_PATH)) return
+
+  const raw = fs.readFileSync(APRIL_SALES_CSV_PATH, 'utf8')
+  const rows = parse(raw, { columns: true, skip_empty_lines: true, trim: true })
+
+  const { rows: adminRows } = await client.query(
+    `SELECT id, username FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1`
+  )
+  const admin = adminRows[0] || null
+
+  const customerIdByName = new Map()
+  let invoicesCreated = 0
+  let customersCreated = 0
+  let skipped = 0
+  let revenueImported = 0
+
+  await client.query('BEGIN')
+  try {
+    for (const row of rows) {
+      const voucherNo = row.voucher_no.trim()
+
+      const { rows: existing } = await client.query(
+        'SELECT 1 FROM invoices WHERE invoice_number = $1',
+        [voucherNo]
+      )
+      if (existing.length > 0) {
+        skipped += 1
+        continue
+      }
+
+      const name = row.customer_name.trim()
+      let customerId = customerIdByName.get(name)
+      if (customerId === undefined) {
+        const { rows: existingCust } = await client.query(
+          'SELECT id FROM customers WHERE name = $1',
+          [name]
+        )
+        if (existingCust.length > 0) {
+          customerId = existingCust[0].id
+        } else {
+          const { rows: newCust } = await client.query(
+            `INSERT INTO customers (name, created_by_user_id, created_by_username)
+             VALUES ($1, $2, $3) RETURNING id`,
+            [name, admin?.id ?? null, admin?.username ?? null]
+          )
+          customerId = newCust[0].id
+          customersCreated += 1
+        }
+        customerIdByName.set(name, customerId)
+      }
+
+      const grandTotal = Math.round(Number(row.amount) * 100) / 100
+      const subtotal = Math.round((grandTotal / (1 + APRIL_SALES_GST_RATE / 100)) * 100) / 100
+      const gstAmount = Math.round((grandTotal - subtotal) * 100) / 100
+      const label = row.label.trim()
+      const items = [{
+        productId: null,
+        category: row.category.trim(),
+        name: label,
+        quantity: 1,
+        catalPrice: subtotal,
+        finalPrice: subtotal,
+        sameAsCatalogue: true,
+      }]
+
+      const { rows: invRows } = await client.query(
+        `INSERT INTO invoices
+           (invoice_number, invoice_date, customer_name, customer_id, items,
+            subtotal, gst_rate, gst_amount, grand_total,
+            created_by_user_id, created_by_username)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING id`,
+        [
+          voucherNo, row.date, name, customerId, JSON.stringify(items),
+          subtotal, APRIL_SALES_GST_RATE, gstAmount, grandTotal,
+          admin?.id ?? null, admin?.username ?? null,
+        ]
+      )
+
+      // Recorded as paid in full — a Tally sales register reflects issued,
+      // recognized invoices, and there's no separate receipts sheet here
+      // to say otherwise. Payment method isn't in the source data either,
+      // so it's left blank rather than guessed.
+      await client.query(
+        `INSERT INTO payments (invoice_id, amount, payment_date, created_by_user_id, created_by_username)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [invRows[0].id, grandTotal, row.date, admin?.id ?? null, admin?.username ?? null]
+      )
+
+      invoicesCreated += 1
+      revenueImported += grandTotal
+    }
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  }
+
+  if (invoicesCreated === 0 && skipped > 0) {
+    console.log(`April 2026 sales already imported (${skipped} invoices present) — skipping.`)
+  } else {
+    console.log(
+      `Imported ${invoicesCreated} invoice(s) from April 2026 sales `
+      + `(${customersCreated} new customer(s), ${skipped} already present), `
+      + `totalling ₹${revenueImported.toFixed(2)}.`
+    )
+  }
+}
+
 // --- Temporary demo data for trying out Customer Insights against the
 // live app. Guarded by env vars so it never runs by default; every row it
 // creates is unmistakably prefixed "[TEST] " so it's easy to spot and
@@ -445,6 +576,7 @@ async function main() {
     await ensureDefaultTechnicianAccounts(client)
     await ensureDocumentNumberUniqueness(client)
     await ensureInvoiceItemsIndex(client)
+    await importAprilSales(client)
 
     if (process.env.CLEANUP_SAMPLE_DATA === 'true') {
       await cleanupSampleCustomerData(client)

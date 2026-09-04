@@ -427,6 +427,80 @@ app.get('/api/receivables-aging', requireAuth, requireRole('admin', 'sales', 'ac
   }
 })
 
+// Sales Analytics: the charts behind a month — daily trend, revenue by
+// category (from each invoice's first line item, which is the whole
+// category for a single-line historical import and a reasonable label
+// even for a normal multi-item invoice), a 6-month trend ending on the
+// selected month, and the top customers by revenue in that month.
+app.get('/api/sales-analytics', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
+  try {
+    const month = typeof req.query.month === 'string' && /^\d{4}-\d{2}$/.test(req.query.month)
+      ? req.query.month
+      : new Date().toISOString().slice(0, 7)
+    const monthStart = `${month}-01`
+
+    const { rows: dailyRows } = await pool.query(
+      `SELECT invoice_date::date AS date, SUM(grand_total)::float AS total, COUNT(*)::int AS count
+         FROM invoices
+        WHERE invoice_date >= $1::date AND invoice_date < ($1::date + INTERVAL '1 month')
+        GROUP BY invoice_date
+        ORDER BY invoice_date ASC`,
+      [monthStart]
+    )
+
+    const { rows: categoryRows } = await pool.query(
+      `SELECT COALESCE(NULLIF(TRIM(items->0->>'category'), ''), 'Uncategorized') AS category,
+              SUM(grand_total)::float AS total, COUNT(*)::int AS count
+         FROM invoices
+        WHERE invoice_date >= $1::date AND invoice_date < ($1::date + INTERVAL '1 month')
+        GROUP BY 1
+        ORDER BY total DESC`,
+      [monthStart]
+    )
+
+    const { rows: customerRows } = await pool.query(
+      `SELECT customer_name AS name, SUM(grand_total)::float AS total, COUNT(*)::int AS count
+         FROM invoices
+        WHERE invoice_date >= $1::date AND invoice_date < ($1::date + INTERVAL '1 month')
+        GROUP BY customer_name
+        ORDER BY total DESC
+        LIMIT 10`,
+      [monthStart]
+    )
+
+    // Six months ending on the selected month, so a real month with data
+    // is never crowded out by trailing empty ones from "now".
+    const { rows: monthlyRows } = await pool.query(
+      `SELECT to_char(m, 'YYYY-MM') AS month, COALESCE(SUM(i.grand_total), 0)::float AS total
+         FROM generate_series($1::date - INTERVAL '5 months', $1::date, INTERVAL '1 month') AS m
+         LEFT JOIN invoices i
+           ON i.invoice_date >= m AND i.invoice_date < (m + INTERVAL '1 month')
+        GROUP BY m
+        ORDER BY m ASC`,
+      [monthStart]
+    )
+
+    const totalRevenue = dailyRows.reduce((sum, r) => sum + r.total, 0)
+    const invoiceCount = dailyRows.reduce((sum, r) => sum + r.count, 0)
+
+    res.json({
+      month,
+      totals: {
+        revenue: Math.round(totalRevenue * 100) / 100,
+        invoiceCount,
+        avgInvoice: invoiceCount > 0 ? Math.round((totalRevenue / invoiceCount) * 100) / 100 : 0,
+      },
+      dailyTrend: dailyRows,
+      byCategory: categoryRows,
+      topCustomers: customerRows,
+      monthlyTrend: monthlyRows,
+    })
+  } catch (err) {
+    console.error('GET /api/sales-analytics failed:', err)
+    res.status(500).json({ message: 'Could not load sales analytics' })
+  }
+})
+
 // Trace one serial number: which sale it came from, whether it's still in
 // warranty, and what service history it has. Ties together data already
 // being captured — per-unit serials on invoice line items, warranty months

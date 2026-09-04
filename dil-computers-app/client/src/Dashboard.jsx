@@ -26,6 +26,7 @@ import TechnicianJobs from './TechnicianJobs'
 import WarrantyLookup from './WarrantyLookup'
 import Receivables from './Receivables'
 import GstSummary from './GstSummary'
+import SalesAnalytics from './SalesAnalytics'
 
 // Which roles see each tab, grouped for the sidebar. 'staff' is
 // deliberately narrow — create-only access to quotations and purchase
@@ -40,6 +41,7 @@ const TABS = [
   { id: 'myJobs', label: 'My Jobs', group: 'Field Service', roles: ['technician'], Component: TechnicianJobs },
 
   { id: 'overview', label: 'Overview', group: 'Overview', roles: ['admin', 'sales', 'accountant'], Component: Overview },
+  { id: 'salesAnalytics', label: 'Sales Analytics', group: 'Insights', roles: ['admin', 'sales', 'accountant'], Component: SalesAnalytics },
   { id: 'customerInsights', label: 'Customer Insights', group: 'Insights', roles: ['admin'], Component: CustomerInsights },
 
   { id: 'quotation', label: 'Create Quotation', group: 'Sales', roles: ['admin', 'sales', 'staff'], Component: CreateQuotation },
