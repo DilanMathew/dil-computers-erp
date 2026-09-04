@@ -261,6 +261,96 @@ app.get('/api/next-document-number', requireAuth, async (req, res) => {
   }
 })
 
+// Trace one serial number: which sale it came from, whether it's still in
+// warranty, and what service history it has. Ties together data already
+// being captured — per-unit serials on invoice line items, warranty months
+// on the product, and repair tickets recorded against the same serial.
+//
+// Warranty length comes from the product's *current* catalogue setting,
+// since the sale doesn't record what it was at the time. Changing a
+// product's warranty therefore changes what past sales report — worth
+// knowing before leaning on this for a disputed claim.
+app.get('/api/serial-lookup', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
+  try {
+    const serial = typeof req.query.serial === 'string' ? req.query.serial.trim() : ''
+    if (!serial) {
+      return res.status(400).json({ message: 'Enter a serial number to look up' })
+    }
+
+    // Exact match first — JSONB containment, which the GIN index on
+    // invoices.items can serve. Serials scanned from a barcode match here.
+    const salesQuery = (whereClause, params) => pool.query(
+      `SELECT i.id AS invoice_id, i.invoice_number, i.invoice_date,
+              i.customer_id, i.customer_name, i.customer_phone,
+              item->>'name' AS product_name, item->>'category' AS category,
+              (item->>'productId')::int AS product_id,
+              p.warranty_months
+         FROM invoices i
+         CROSS JOIN LATERAL jsonb_array_elements(i.items) AS item
+         LEFT JOIN products p ON p.id = (item->>'productId')::int
+        WHERE ${whereClause}
+        ORDER BY i.invoice_date DESC, i.id DESC`,
+      params
+    )
+
+    let { rows: sales } = await salesQuery(
+      `i.items @> $1::jsonb AND item->'serialNumbers' @> $2::jsonb`,
+      [JSON.stringify([{ serialNumbers: [serial] }]), JSON.stringify([serial])]
+    )
+
+    // Nothing exact? Try case-insensitively — a serial read off a label by
+    // hand often differs in case from how it was typed at the till. This
+    // one can't use the index, so it's only reached when the fast path
+    // found nothing.
+    if (sales.length === 0) {
+      ({ rows: sales } = await salesQuery(
+        `EXISTS (
+           SELECT 1 FROM jsonb_array_elements_text(
+             CASE WHEN jsonb_typeof(item->'serialNumbers') = 'array'
+                  THEN item->'serialNumbers' ELSE '[]'::jsonb END
+           ) AS s WHERE lower(s) = lower($1)
+         )`,
+        [serial]
+      ))
+    }
+
+    const today = new Date()
+    const withWarranty = sales.map((row) => {
+      const months = row.warranty_months
+      if (!Number.isInteger(months) || months <= 0 || !row.invoice_date) {
+        return { ...row, warranty_expires_on: null, warranty_status: 'unknown', days_remaining: null }
+      }
+      const expires = new Date(row.invoice_date)
+      expires.setMonth(expires.getMonth() + months)
+      const daysRemaining = Math.ceil((expires - today) / (1000 * 60 * 60 * 24))
+      return {
+        ...row,
+        warranty_expires_on: expires.toISOString().slice(0, 10),
+        warranty_status: daysRemaining >= 0 ? 'in_warranty' : 'expired',
+        days_remaining: daysRemaining,
+      }
+    })
+
+    // Service history recorded against the same serial, so a repeat fault
+    // shows up next to the sale it came from.
+    const { rows: repairs } = await pool.query(
+      `SELECT t.id, t.ticket_number, t.received_date, t.completed_date, t.status,
+              t.reported_issue, t.diagnosis, t.warranty_days, t.invoice_number,
+              c.name AS customer_name
+         FROM repair_tickets t
+         LEFT JOIN customers c ON c.id = t.customer_id
+        WHERE lower(t.serial_number) = lower($1)
+        ORDER BY t.received_date DESC, t.id DESC`,
+      [serial]
+    )
+
+    res.json({ serial, sales: withWarranty, repairs })
+  } catch (err) {
+    console.error('GET /api/serial-lookup failed:', err)
+    res.status(500).json({ message: 'Could not look up that serial number' })
+  }
+})
+
 app.post('/api/login', loginRateLimit, async (req, res) => {
   try {
     const { username, password } = req.body || {}
