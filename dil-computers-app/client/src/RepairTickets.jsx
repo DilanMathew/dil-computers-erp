@@ -37,7 +37,7 @@ function StatusBadge({ status }) {
   return <span style={{ ...styles.badge, ...colors }}>{STATUS_LABELS[status] || status}</span>
 }
 
-function RepairTicketDetail({ token, onLogout, ticket, canEdit, onSaved }) {
+function RepairTicketDetail({ token, onLogout, ticket, canEdit, technicians, onSaved }) {
   const [status, setStatus] = useState(ticket.status)
   const [diagnosis, setDiagnosis] = useState(ticket.diagnosis || '')
   const [finalCost, setFinalCost] = useState(ticket.final_cost ?? '')
@@ -85,6 +85,12 @@ function RepairTicketDetail({ token, onLogout, ticket, canEdit, onSaved }) {
         <span>Reported issue: {ticket.reported_issue}</span>
         {ticket.estimated_cost != null && <span>Estimated cost: {formatPrice(ticket.estimated_cost)}</span>}
         <span>Created by: {ticket.created_by_username || '—'}</span>
+        {ticket.hours_worked != null && (
+          <span>On-site hours billed: {ticket.hours_worked}</span>
+        )}
+        {Array.isArray(ticket.parts_used) && ticket.parts_used.length > 0 && (
+          <span>Parts fitted: {ticket.parts_used.map((p) => `${p.name} ×${p.quantity}`).join(', ')}</span>
+        )}
       </div>
 
       {canEdit ? (
@@ -99,7 +105,12 @@ function RepairTicketDetail({ token, onLogout, ticket, canEdit, onSaved }) {
           </div>
           <div>
             <label style={styles.fieldLabel}>Assigned to</label>
-            <input style={styles.input} value={assignedToUsername} onChange={(e) => setAssignedToUsername(e.target.value)} placeholder="Technician username" />
+            <select style={styles.input} value={assignedToUsername} onChange={(e) => setAssignedToUsername(e.target.value)}>
+              <option value="">Unassigned</option>
+              {technicians.map((t) => (
+                <option key={t.id} value={t.username}>{t.full_name || t.username}</option>
+              ))}
+            </select>
           </div>
           <div>
             <label style={styles.fieldLabel}>Final cost</label>
@@ -159,6 +170,18 @@ export default function RepairTickets({ token, user, onLogout }) {
   const [error, setError] = useState('')
   const [expandedId, setExpandedId] = useState(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [technicians, setTechnicians] = useState([])
+
+  // Only admin/sales can edit a ticket's assignment (and only they can hit
+  // this endpoint at all) — skip the fetch for accountant's read-only view.
+  useEffect(() => {
+    if (!canEdit) return
+    apiFetch('/api/technicians', token)
+      .then((data) => setTechnicians(data.technicians || []))
+      .catch((err) => {
+        if (err instanceof AuthError) onLogout()
+      })
+  }, [token, canEdit, onLogout])
 
   useEffect(() => {
     const id = setTimeout(() => setDebouncedSearch(search), 300)
@@ -256,6 +279,7 @@ export default function RepairTickets({ token, user, onLogout }) {
                           onLogout={onLogout}
                           ticket={t}
                           canEdit={canEdit}
+                          technicians={technicians}
                           onSaved={() => setRefreshKey((k) => k + 1)}
                         />
                       </td>

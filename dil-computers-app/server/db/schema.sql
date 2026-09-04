@@ -344,3 +344,14 @@ CREATE INDEX IF NOT EXISTS payroll_records_created_at_idx ON payroll_records (cr
 -- derived live and never stored; this is the one thing a person sets by
 -- hand when the numbers don't tell the whole story.
 ALTER TABLE customers ADD COLUMN IF NOT EXISTS risk_tag TEXT;
+
+-- On-site field billing: a technician bills a completed job in one atomic
+-- action (POST /api/repair-tickets/:id/bill) covering labor hours and/or
+-- parts fitted. hours_worked and parts_used are the snapshot of what that
+-- action billed — parts_used mirrors invoice items' shape (category,
+-- name, quantity, price) but only ever holds actual parts, never the
+-- labor line itself. Priced server-side only (a fixed rate for labor, the
+-- catalogue price for parts) — a technician never enters or edits a
+-- price, by design.
+ALTER TABLE repair_tickets ADD COLUMN IF NOT EXISTS hours_worked NUMERIC(6, 2);
+ALTER TABLE repair_tickets ADD COLUMN IF NOT EXISTS parts_used JSONB;

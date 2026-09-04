@@ -18,7 +18,7 @@ if (!process.env.AUTH_SECRET) {
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000 // 8 hours
 const BCRYPT_ROUNDS = 10
 
-const ROLES = ['admin', 'sales', 'accountant', 'staff']
+const ROLES = ['admin', 'sales', 'accountant', 'staff', 'technician']
 
 function sign(subject, expiresAt) {
   const payload = `${subject}.${expiresAt}`

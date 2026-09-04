@@ -18,9 +18,21 @@ export default function CreateRepairTicket({ token, onLogout }) {
   const [amcSuggestions, setAmcSuggestions] = useState([])
   const [showAmcSuggestions, setShowAmcSuggestions] = useState(false)
 
+  const [technicians, setTechnicians] = useState([])
+  const [assignedToUsername, setAssignedToUsername] = useState('')
+
   const [formError, setFormError] = useState('')
   const [successMessage, setSuccessMessage] = useState('')
   const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    apiFetch('/api/technicians', token)
+      .then((data) => setTechnicians(data.technicians || []))
+      .catch((err) => {
+        if (err instanceof AuthError) onLogout()
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Look up AMC contracts as the user types, same pattern as the
   // quotation-reference autocomplete on Create Invoice.
@@ -81,6 +93,7 @@ export default function CreateRepairTicket({ token, onLogout }) {
           estimatedCost: estimatedCost === '' ? null : estimatedCost,
           receivedDate,
           amcContractId,
+          assignedToUsername,
         }),
       })
 
@@ -96,6 +109,7 @@ export default function CreateRepairTicket({ token, onLogout }) {
       setEstimatedCost('')
       setAmcQuery('')
       setAmcContractId(null)
+      setAssignedToUsername('')
     } catch (err) {
       if (err instanceof AuthError) {
         onLogout()
@@ -162,6 +176,20 @@ export default function CreateRepairTicket({ token, onLogout }) {
             value={serialNumber}
             onChange={(e) => setSerialNumber(e.target.value)}
           />
+        </div>
+        <div>
+          <label style={styles.label} htmlFor="assignedTech">Assign technician (optional)</label>
+          <select
+            id="assignedTech"
+            style={styles.input}
+            value={assignedToUsername}
+            onChange={(e) => setAssignedToUsername(e.target.value)}
+          >
+            <option value="">Unassigned</option>
+            {technicians.map((t) => (
+              <option key={t.id} value={t.username}>{t.full_name || t.username}</option>
+            ))}
+          </select>
         </div>
         <div>
           <label style={styles.label} htmlFor="estimatedCost">Estimated cost (optional)</label>
