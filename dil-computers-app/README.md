@@ -28,9 +28,9 @@ only the sections your role can use:
   demand from the stored invoice data — nothing is saved as a file at
   creation time). Every metric is computed live from
   invoices/payments/credit notes/repair tickets/AMC contracts — nothing
-  here is a separately stored total that could drift. "Late" is a
-  30-day proxy against `invoice_date`, since there's no due-date/credit-
-  terms concept yet — good enough to flag risk, not a precise SLA.
+  here is a separately stored total that could drift. "Late" is measured
+  against each invoice's own due date, taken from the customer's agreed
+  credit terms when it was issued.
 - **Create Quotation** *(admin, sales)* — pick a product category, search
   for a product by name, and set a quantity; the catalogue price
   auto-populates. Final price starts empty — tick "Same as catalogue price"
@@ -73,6 +73,12 @@ only the sections your role can use:
 - **Credit Notes** *(all roles)* — searchable, paginated list of every
   credit note, with an expandable row showing the returned items, reason,
   refund method, and GST breakdown.
+- **Receivables** *(admin, sales, accountant)* — every invoice still owing
+  money, bucketed by how far past its due date it is (not yet due, then
+  1–30 / 31–60 / 61–90 / 90+ days). Click a band to filter the list. Due
+  dates come from the customer's agreed credit terms; an invoice with no
+  due date was due on receipt, so an unpaid cash sale shows as overdue
+  from day one.
 - **Customers** *(all roles view; admin/sales can add/edit)* — searchable,
   paginated list of saved customer records (name, phone, email, address,
   notes). An expandable row shows and edits those details plus every
@@ -392,6 +398,26 @@ breaking old invoices that cite it). Both carry
 `created_by_user_id`/`created_by_username` and an optional `customer_id`
 — linking a saved customer is optional either way, so a walk-in sale with
 no saved record works exactly as before.
+
+### Credit terms and due dates
+
+`customers.payment_terms_days` is how many days after the invoice date
+that customer's payment falls due; NULL means due on receipt, the
+ordinary walk-in case. `invoices.due_date` is set from those terms when
+the invoice is created (or entered directly on the invoice), and an
+invoice with no due date is treated as due on its invoice date.
+
+`due_date` is **stored** rather than derived, which is deliberately the
+opposite of how invoice payment status and AMC status work. Those are
+computed live so they can't drift. A due date can't be: the terms agreed
+when an invoice was issued are a historical fact, so recomputing it from
+the customer's current terms would silently move the goalposts on
+invoices already sent, and rewrite whether past payments were late.
+
+`GET /api/receivables-aging` (admin/sales/accountant) returns every
+invoice still owing money with its bucket, and `GET /api/invoices`
+accepts `status=overdue` — which cuts across paid/partial/unpaid, since
+it means "still owing and past due" rather than a payment state.
 
 **`amc_contracts`** — annual maintenance contracts, written by
 `POST /api/amc-contracts`. Links to a saved `customer_id` (required — no

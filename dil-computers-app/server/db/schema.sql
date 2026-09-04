@@ -355,3 +355,21 @@ ALTER TABLE customers ADD COLUMN IF NOT EXISTS risk_tag TEXT;
 -- price, by design.
 ALTER TABLE repair_tickets ADD COLUMN IF NOT EXISTS hours_worked NUMERIC(6, 2);
 ALTER TABLE repair_tickets ADD COLUMN IF NOT EXISTS parts_used JSONB;
+
+-- Credit terms and due dates. payment_terms_days is how many days after
+-- the invoice date this customer's payment is due; NULL means due on
+-- receipt, which is the common walk-in case.
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS payment_terms_days INTEGER;
+
+-- invoices.due_date is *stored* rather than derived, which is deliberate
+-- and the opposite of how invoice payment status and AMC status work.
+-- Those are computed live so they can't drift. A due date can't be, since
+-- the terms agreed when the invoice was issued are a historical fact:
+-- recomputing it from the customer's current terms would silently move
+-- the goalposts on invoices already sent, and rewrite whether past
+-- payments were late. NULL means due on receipt.
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS due_date DATE;
+
+-- Aging queries filter on "unpaid and past due", so the due date is the
+-- selective column worth indexing.
+CREATE INDEX IF NOT EXISTS invoices_due_date_idx ON invoices (due_date);

@@ -27,6 +27,7 @@ function CustomerDetail({ token, onLogout, customerId, canEdit, onSaved }) {
           email: data.customer.email || '',
           address: data.customer.address || '',
           notes: data.customer.notes || '',
+          paymentTermsDays: data.customer.payment_terms_days ?? '',
         })
       })
       .catch((err) => {
@@ -69,6 +70,19 @@ function CustomerDetail({ token, onLogout, customerId, canEdit, onSaved }) {
           <input style={styles.input} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="Phone" />
           <input style={styles.input} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="Email" />
           <input style={styles.input} value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} placeholder="Address" />
+          <div>
+            <input
+              style={styles.input}
+              type="number"
+              min="0"
+              max="365"
+              step="1"
+              value={form.paymentTermsDays}
+              onChange={(e) => setForm({ ...form, paymentTermsDays: e.target.value })}
+              placeholder="Payment terms (days)"
+            />
+            <div style={styles.fieldHint}>Blank = due on receipt</div>
+          </div>
           <input style={{ ...styles.input, gridColumn: '1 / -1' }} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Notes" />
           {error && <div style={styles.error}>{error}</div>}
           <div>
@@ -86,6 +100,11 @@ function CustomerDetail({ token, onLogout, customerId, canEdit, onSaved }) {
             {detail.customer.email && <span>Email: {detail.customer.email}</span>}
             {detail.customer.address && <span>Address: {detail.customer.address}</span>}
             {detail.customer.notes && <span>Notes: {detail.customer.notes}</span>}
+            <span>
+              Payment terms: {detail.customer.payment_terms_days != null
+                ? `${detail.customer.payment_terms_days} days`
+                : 'Due on receipt'}
+            </span>
             {canEdit && (
               <button type="button" style={styles.smallButtonSecondary} onClick={() => setEditing(true)}>
                 Edit
@@ -142,7 +161,7 @@ export default function Customers({ token, user, onLogout }) {
   const [refreshKey, setRefreshKey] = useState(0)
 
   const [showForm, setShowForm] = useState(false)
-  const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', email: '', address: '', notes: '' })
+  const [newCustomer, setNewCustomer] = useState({ name: '', phone: '', email: '', address: '', notes: '', paymentTermsDays: '' })
   const [formError, setFormError] = useState('')
   const [creating, setCreating] = useState(false)
 
@@ -193,7 +212,7 @@ export default function Customers({ token, user, onLogout }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newCustomer),
       })
-      setNewCustomer({ name: '', phone: '', email: '', address: '', notes: '' })
+      setNewCustomer({ name: '', phone: '', email: '', address: '', notes: '', paymentTermsDays: '' })
       setShowForm(false)
       setRefreshKey((k) => k + 1)
     } catch (err) {
@@ -233,6 +252,7 @@ export default function Customers({ token, user, onLogout }) {
             <input style={styles.input} placeholder="Phone" value={newCustomer.phone} onChange={(e) => setNewCustomer({ ...newCustomer, phone: e.target.value })} />
             <input style={styles.input} placeholder="Email" value={newCustomer.email} onChange={(e) => setNewCustomer({ ...newCustomer, email: e.target.value })} />
             <input style={styles.input} placeholder="Address" value={newCustomer.address} onChange={(e) => setNewCustomer({ ...newCustomer, address: e.target.value })} />
+            <input style={styles.input} type="number" min="0" max="365" step="1" placeholder="Payment terms (days) — blank = on receipt" value={newCustomer.paymentTermsDays} onChange={(e) => setNewCustomer({ ...newCustomer, paymentTermsDays: e.target.value })} />
           </div>
           {formError && <div style={styles.error}>{formError}</div>}
           <button type="submit" style={{ ...styles.addButton, marginTop: 12 }} disabled={creating}>
@@ -301,6 +321,7 @@ export default function Customers({ token, user, onLogout }) {
 }
 
 const styles = {
+  fieldHint: { fontSize: 11, color: '#64748b', marginTop: 3 },
   header: { marginBottom: 20 },
   title: { margin: 0, fontSize: 18, color: '#0f172a' },
   subtitle: { margin: '4px 0 0 0', color: '#64748b', fontSize: 14 },
