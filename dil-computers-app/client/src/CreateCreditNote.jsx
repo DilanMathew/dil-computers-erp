@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, AuthError } from './api'
 import { formatPrice } from './format'
-import { generateDocumentNumber } from './documentPdf'
+import useDocumentNumber from './useDocumentNumber'
 
 const REFUND_METHODS = ['Cash', 'Card', 'UPI', 'Bank Transfer', 'Store Credit', 'Other']
 
 export default function CreateCreditNote({ token, onLogout }) {
-  const [creditNoteNumber, setCreditNoteNumber] = useState(() => generateDocumentNumber('CN'))
+  const [creditNoteNumber, setCreditNoteNumber, refreshCreditNoteNumber] = useDocumentNumber('CN', token)
   const [reason, setReason] = useState('')
   const [refundMethod, setRefundMethod] = useState(REFUND_METHODS[0])
 
@@ -111,7 +111,7 @@ export default function CreateCreditNote({ token, onLogout }) {
         `Credit note ${creditNote.credit_note_number} saved — ${formatPrice(creditNote.grand_total)} refundable. Stock updated.`
       )
 
-      setCreditNoteNumber(generateDocumentNumber('CN'))
+      refreshCreditNoteNumber()
       setReason('')
       setRefundMethod(REFUND_METHODS[0])
       clearInvoice()

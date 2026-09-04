@@ -455,6 +455,38 @@ invoice's status (`paid` / `partial` / `unpaid`) is always computed from
 `SUM(payments.amount)` vs `invoices.grand_total` — never stored — so it
 can't drift out of sync with the payments actually on record.
 
+### Document numbers
+
+Each document's own number (`quotations.quotation_number`,
+`invoices.invoice_number`, `purchase_orders.po_number`,
+`amc_contracts.contract_number`, `repair_tickets.ticket_number`,
+`credit_notes.credit_note_number`) carries a unique index, so two
+documents of the same type can't share a number. Trying to save a
+duplicate returns a `409` naming the field rather than a generic error.
+
+The free-text *references* between documents — `invoices.quotation_number`,
+`invoices.ticket_number`, `repair_tickets.invoice_number`,
+`credit_notes.invoice_number` — are deliberately **not** unique: several
+documents can legitimately point at the same invoice or quotation.
+
+New numbers come from `GET /api/next-document-number?prefix=INV`, which
+checks what's already stored for that day before handing one back. The
+form falls back to generating one locally if that request fails, so it
+still works offline — the unique index remains the actual guarantee, not
+the number handout.
+
+The seed step adds these indexes on deploy, but a database that already
+contains duplicates can't take one. Rather than fail the deploy or
+silently renumber existing financial documents, it logs a warning naming
+the duplicates and skips that index; resolve them (renumber the later
+document of each pair) and the index is added on the next deploy.
+
+> **Note on GST numbering:** these numbers are `PREFIX-YYYYMMDD-NNNN`
+> with a random suffix, which is unique but not sequential. Indian GST
+> rules are generally understood to require a *consecutive serial* number
+> unique within a financial year — confirm the exact requirement with
+> your accountant before relying on this format for filed invoices.
+
 **`audit_log`** — one row per tracked action (`user.create`, `user.update`,
 `quotation.create`, `invoice.create`, `customer.create`, `customer.update`,
 `payment.record`, `product.update`, `supplier.create`, `supplier.update`,

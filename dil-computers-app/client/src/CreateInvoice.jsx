@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, AuthError } from './api'
 import { formatPrice, GST_RATES, computeGstTotals } from './format'
-import { buildDocumentPdf, generateDocumentNumber, todayIso } from './documentPdf'
+import { buildDocumentPdf, todayIso } from './documentPdf'
+import useDocumentNumber from './useDocumentNumber'
 import useLineItemBuilder from './useLineItemBuilder'
 import useCompanyInfo from './useCompanyInfo'
 import ProductPicker from './ProductPicker'
@@ -11,7 +12,7 @@ import CustomerPicker from './CustomerPicker'
 const PAYMENT_METHODS = ['Cash', 'Card', 'UPI', 'Bank Transfer', 'Other']
 
 export default function CreateInvoice({ token, onLogout }) {
-  const [invoiceNumber, setInvoiceNumber] = useState(() => generateDocumentNumber('INV'))
+  const [invoiceNumber, setInvoiceNumber, refreshInvoiceNumber] = useDocumentNumber('INV', token)
   const [invoiceDate, setInvoiceDate] = useState(todayIso)
   const [customerName, setCustomerName] = useState('')
   const [customerId, setCustomerId] = useState(null)
@@ -202,7 +203,7 @@ export default function CreateInvoice({ token, onLogout }) {
       setAmountReceived('')
       setQuotationQuery('')
       setTicketQuery('')
-      setInvoiceNumber(generateDocumentNumber('INV'))
+      refreshInvoiceNumber()
       setInvoiceDate(todayIso())
     } catch (err) {
       if (err instanceof AuthError) {

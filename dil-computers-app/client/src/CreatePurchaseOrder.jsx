@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, AuthError } from './api'
 import { formatPrice } from './format'
-import { generateDocumentNumber, todayIso } from './documentPdf'
+import { todayIso } from './documentPdf'
+import useDocumentNumber from './useDocumentNumber'
 import CustomerPicker from './CustomerPicker'
 
 // A lean, purchase-specific product picker — separate from ProductPicker
@@ -136,7 +137,7 @@ function PurchaseItemPicker({ token, onLogout, category, setCategory, categories
 }
 
 export default function CreatePurchaseOrder({ token, onLogout }) {
-  const [poNumber, setPoNumber] = useState(() => generateDocumentNumber('PO'))
+  const [poNumber, setPoNumber, refreshPoNumber] = useDocumentNumber('PO', token)
   const [poDate, setPoDate] = useState(todayIso)
   const [supplierName, setSupplierName] = useState('')
   const [supplierId, setSupplierId] = useState(null)
@@ -239,7 +240,7 @@ export default function CreatePurchaseOrder({ token, onLogout }) {
       setLineItems([])
       setSupplierName('')
       setSupplierId(null)
-      setPoNumber(generateDocumentNumber('PO'))
+      refreshPoNumber()
       setPoDate(todayIso())
     } catch (err) {
       if (err instanceof AuthError) {

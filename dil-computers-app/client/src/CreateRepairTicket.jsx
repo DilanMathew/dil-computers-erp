@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, AuthError } from './api'
-import { generateDocumentNumber, todayIso } from './documentPdf'
+import { todayIso } from './documentPdf'
+import useDocumentNumber from './useDocumentNumber'
 import CustomerPicker from './CustomerPicker'
 
 export default function CreateRepairTicket({ token, onLogout }) {
-  const [ticketNumber, setTicketNumber] = useState(() => generateDocumentNumber('TKT'))
+  const [ticketNumber, setTicketNumber, refreshTicketNumber] = useDocumentNumber('TKT', token)
   const [receivedDate, setReceivedDate] = useState(todayIso)
   const [customerName, setCustomerName] = useState('')
   const [customerId, setCustomerId] = useState(null)
@@ -118,7 +119,7 @@ export default function CreateRepairTicket({ token, onLogout }) {
           : `Ticket ${ticket.ticket_number} saved. Update its status from the Repair Tickets list as work progresses.`
       )
 
-      setTicketNumber(generateDocumentNumber('TKT'))
+      refreshTicketNumber()
       setReceivedDate(todayIso())
       setCustomerName('')
       setCustomerId(null)

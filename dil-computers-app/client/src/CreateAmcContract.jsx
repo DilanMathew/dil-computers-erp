@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { apiFetch, AuthError } from './api'
-import { generateDocumentNumber, todayIso } from './documentPdf'
+import { todayIso } from './documentPdf'
+import useDocumentNumber from './useDocumentNumber'
 import CustomerPicker from './CustomerPicker'
 
 export default function CreateAmcContract({ token, onLogout }) {
-  const [contractNumber, setContractNumber] = useState(() => generateDocumentNumber('AMC'))
+  const [contractNumber, setContractNumber, refreshContractNumber] = useDocumentNumber('AMC', token)
   const [startDate, setStartDate] = useState(todayIso)
   const [endDate, setEndDate] = useState('')
   const [customerName, setCustomerName] = useState('')
@@ -60,7 +61,7 @@ export default function CreateAmcContract({ token, onLogout }) {
 
       setSuccessMessage(`AMC contract ${contract.contract_number} saved, running to ${contract.end_date.slice(0, 10)}.`)
 
-      setContractNumber(generateDocumentNumber('AMC'))
+      refreshContractNumber()
       setStartDate(todayIso())
       setEndDate('')
       setCustomerName('')
