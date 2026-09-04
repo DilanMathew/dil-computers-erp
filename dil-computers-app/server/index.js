@@ -162,6 +162,12 @@ function computeSubtotal(items) {
 
 const GST_RATES = [0, 5, 12, 18, 28]
 
+// Fixed ₹/hour labor rate for on-site technician billing — never sent to
+// or editable by a technician. Admin can tune it via this one env var
+// without a code change; exposed read-only via /api/company-info so the
+// technician's app can show an accurate estimate before submitting.
+const LABOR_RATE_PER_HOUR = Number(process.env.LABOR_RATE_PER_HOUR) || 100
+
 // Returns { rate, subtotal, gstAmount, grandTotal } from a raw rate value
 // and the line items' pre-tax subtotal. Falls back to 0% for anything not
 // one of the standard GST slabs, rather than trusting an arbitrary number.
@@ -216,6 +222,7 @@ app.get('/api/company-info', (req, res) => {
     name: process.env.COMPANY_NAME || 'DIL Computers',
     gstin: process.env.COMPANY_GSTIN || '',
     address: process.env.COMPANY_ADDRESS || '',
+    laborRatePerHour: LABOR_RATE_PER_HOUR,
   })
 })
 
@@ -388,7 +395,7 @@ app.get('/api/audit-log', requireAuth, requireRole('admin'), async (req, res) =>
 
 // --- Customers ---
 
-app.get('/api/customers', requireAuth, async (req, res) => {
+app.get('/api/customers', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
@@ -428,7 +435,7 @@ app.get('/api/customers', requireAuth, async (req, res) => {
   }
 })
 
-app.get('/api/customers/:id', requireAuth, async (req, res) => {
+app.get('/api/customers/:id', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10)
     if (!Number.isInteger(id)) {
@@ -1411,7 +1418,7 @@ app.get('/api/purchase-orders', requireAuth, requireRole('admin', 'sales', 'acco
 
 // --- AMC contracts ---
 
-app.get('/api/amc-contracts', requireAuth, async (req, res) => {
+app.get('/api/amc-contracts', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
@@ -1471,7 +1478,7 @@ app.get('/api/amc-contracts', requireAuth, async (req, res) => {
   }
 })
 
-app.get('/api/amc-contracts/:id', requireAuth, async (req, res) => {
+app.get('/api/amc-contracts/:id', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10)
     if (!Number.isInteger(id)) {
@@ -1637,7 +1644,7 @@ const TICKET_STATUSES = [
   'received', 'diagnosing', 'waiting_for_parts', 'in_repair', 'ready_for_pickup', 'completed', 'cancelled',
 ]
 
-app.get('/api/repair-tickets', requireAuth, async (req, res) => {
+app.get('/api/repair-tickets', requireAuth, requireRole('admin', 'sales', 'accountant', 'technician'), async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
@@ -1645,6 +1652,13 @@ app.get('/api/repair-tickets', requireAuth, async (req, res) => {
 
     const conditions = []
     const params = []
+    // A technician only ever sees tickets assigned to them — forced
+    // server-side from the token, not a client-supplied filter, so it
+    // can't be queried around.
+    if (req.user.role === 'technician') {
+      params.push(req.user.username)
+      conditions.push(`t.assigned_to_username = $${params.length}`)
+    }
     if (req.query.q) {
       params.push(`%${req.query.q}%`)
       conditions.push(`(t.ticket_number ILIKE $${params.length} OR c.name ILIKE $${params.length} OR t.device_description ILIKE $${params.length})`)
@@ -1668,6 +1682,7 @@ app.get('/api/repair-tickets', requireAuth, async (req, res) => {
               t.device_description, t.serial_number, t.reported_issue, t.diagnosis, t.status,
               t.estimated_cost, t.final_cost, t.invoice_number, t.amc_contract_id, t.warranty_days,
               t.received_date, t.completed_date, t.assigned_to_username, t.notes,
+              t.hours_worked, t.parts_used,
               t.created_by_username, t.created_at
        FROM repair_tickets t
        LEFT JOIN customers c ON c.id = t.customer_id
@@ -1690,7 +1705,7 @@ app.get('/api/repair-tickets', requireAuth, async (req, res) => {
   }
 })
 
-app.get('/api/repair-tickets/:id', requireAuth, async (req, res) => {
+app.get('/api/repair-tickets/:id', requireAuth, requireRole('admin', 'sales', 'accountant', 'technician'), async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10)
     if (!Number.isInteger(id)) {
@@ -1701,8 +1716,8 @@ app.get('/api/repair-tickets/:id', requireAuth, async (req, res) => {
       `SELECT t.id, t.ticket_number, t.customer_id, c.name AS customer_name, c.phone AS customer_phone,
               c.address AS customer_address, t.device_description, t.serial_number, t.reported_issue,
               t.diagnosis, t.status, t.estimated_cost, t.final_cost, t.invoice_number, t.amc_contract_id,
-              t.warranty_days, t.received_date, t.completed_date, t.assigned_to_username, t.notes,
-              t.created_by_username, t.created_at
+              t.warranty_days, t.hours_worked, t.parts_used, t.received_date, t.completed_date,
+              t.assigned_to_username, t.notes, t.created_by_username, t.created_at
        FROM repair_tickets t
        LEFT JOIN customers c ON c.id = t.customer_id
        WHERE t.id = $1`,
@@ -1711,8 +1726,16 @@ app.get('/api/repair-tickets/:id', requireAuth, async (req, res) => {
     if (rows.length === 0) {
       return res.status(404).json({ message: 'Ticket not found' })
     }
+    const ticket = rows[0]
 
-    res.json({ ticket: rows[0] })
+    // Same as the list route — a technician can't view a ticket that
+    // isn't theirs, even by guessing an id. 404 rather than 403 so it
+    // doesn't confirm the ticket exists at all.
+    if (req.user.role === 'technician' && ticket.assigned_to_username !== req.user.username) {
+      return res.status(404).json({ message: 'Ticket not found' })
+    }
+
+    res.json({ ticket })
   } catch (err) {
     console.error('GET /api/repair-tickets/:id failed:', err)
     res.status(500).json({ message: 'Could not load ticket' })
@@ -1723,7 +1746,7 @@ app.post('/api/repair-tickets', requireAuth, requireRole('admin', 'sales'), asyn
   try {
     const {
       ticketNumber, customerId, deviceDescription, serialNumber, reportedIssue,
-      estimatedCost, receivedDate, amcContractId,
+      estimatedCost, receivedDate, amcContractId, assignedToUsername,
     } = req.body || {}
 
     const number = typeof ticketNumber === 'string' ? ticketNumber.trim() : ''
@@ -1766,11 +1789,16 @@ app.post('/api/repair-tickets', requireAuth, requireRole('admin', 'sales'), asyn
     const { rows } = await pool.query(
       `INSERT INTO repair_tickets
          (ticket_number, customer_id, device_description, serial_number, reported_issue,
-          estimated_cost, received_date, amc_contract_id, created_by_user_id, created_by_username)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          estimated_cost, received_date, amc_contract_id, assigned_to_username,
+          created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id, ticket_number, customer_id, device_description, serial_number, reported_issue,
-                 status, estimated_cost, received_date, amc_contract_id, created_by_username, created_at`,
-      [number, custId, device, clean(serialNumber), issue, estCost, receivedDate, contractId, req.user.id, req.user.username]
+                 status, estimated_cost, received_date, amc_contract_id, assigned_to_username,
+                 created_by_username, created_at`,
+      [
+        number, custId, device, clean(serialNumber), issue, estCost, receivedDate, contractId,
+        clean(assignedToUsername), req.user.id, req.user.username,
+      ]
     )
     const ticket = rows[0]
 
@@ -1792,11 +1820,27 @@ app.post('/api/repair-tickets', requireAuth, requireRole('admin', 'sales'), asyn
   }
 })
 
-app.patch('/api/repair-tickets/:id', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+app.patch('/api/repair-tickets/:id', requireAuth, requireRole('admin', 'sales', 'technician'), async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10)
     if (!Number.isInteger(id)) {
       return res.status(400).json({ message: 'Invalid ticket id' })
+    }
+
+    // A technician can move their own ticket's status along (e.g. mark
+    // themselves as en route or diagnosing) but nothing else here —
+    // diagnosis, cost, and the rest stay office-controlled. Billing (which
+    // sets final_cost/invoice_number/status itself) goes through the
+    // dedicated /bill endpoint below, not this general PATCH.
+    if (req.user.role === 'technician') {
+      const bodyKeys = Object.keys(req.body || {})
+      if (bodyKeys.some((k) => k !== 'status')) {
+        return res.status(403).json({ message: 'Technicians can only update ticket status here' })
+      }
+      const { rows: ownerCheck } = await pool.query('SELECT assigned_to_username FROM repair_tickets WHERE id = $1', [id])
+      if (ownerCheck.length === 0 || ownerCheck[0].assigned_to_username !== req.user.username) {
+        return res.status(404).json({ message: 'Ticket not found' })
+      }
     }
 
     const sets = []
@@ -1879,6 +1923,208 @@ app.patch('/api/repair-tickets/:id', requireAuth, requireRole('admin', 'sales'),
   } catch (err) {
     console.error('PATCH /api/repair-tickets/:id failed:', err)
     res.status(500).json({ message: 'Could not update repair ticket' })
+  }
+})
+
+// Active technician accounts, for staff to assign a job to — not the
+// general Users list, so 'sales' can populate this dropdown without
+// admin-only user-management access.
+app.get('/api/technicians', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, username, full_name FROM users WHERE role = 'technician' AND active = true ORDER BY username ASC`
+    )
+    res.json({ technicians: rows })
+  } catch (err) {
+    console.error('GET /api/technicians failed:', err)
+    res.status(500).json({ message: 'Could not load technicians' })
+  }
+})
+
+// The whole on-site billing flow in one atomic action: hours worked
+// and/or parts fitted become an invoice and a payment together. Pricing
+// is entirely server-computed — labor at the fixed rate above, parts at
+// today's catalogue price — a technician only ever supplies the objective
+// facts (hours, which product, how many), never an amount. A technician
+// can only bill a ticket assigned to them, and only once.
+app.post('/api/repair-tickets/:id/bill', requireAuth, requireRole('admin', 'sales', 'technician'), async (req, res) => {
+  const client = await pool.connect()
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ message: 'Invalid ticket id' })
+    }
+
+    const { rows: ticketRows } = await client.query(
+      `SELECT t.id, t.ticket_number, t.customer_id, c.name AS customer_name, c.phone AS customer_phone,
+              c.address AS customer_address, t.assigned_to_username, t.invoice_number
+       FROM repair_tickets t
+       LEFT JOIN customers c ON c.id = t.customer_id
+       WHERE t.id = $1`,
+      [id]
+    )
+    if (ticketRows.length === 0) {
+      return res.status(404).json({ message: 'Ticket not found' })
+    }
+    const ticket = ticketRows[0]
+
+    if (req.user.role === 'technician' && ticket.assigned_to_username !== req.user.username) {
+      return res.status(404).json({ message: 'Ticket not found' })
+    }
+    if (ticket.invoice_number) {
+      return res.status(400).json({ message: `This ticket was already billed as invoice ${ticket.invoice_number}.` })
+    }
+
+    const { hoursWorked, parts: rawParts, invoiceNumber, invoiceDate, gstRate, amountReceived, paymentMethod } = req.body || {}
+
+    const number = typeof invoiceNumber === 'string' ? invoiceNumber.trim() : ''
+    if (!number) {
+      return res.status(400).json({ message: 'Invoice number is required' })
+    }
+    if (!isValidDateString(invoiceDate)) {
+      return res.status(400).json({ message: 'A valid invoice date (YYYY-MM-DD) is required' })
+    }
+
+    let hours = null
+    if (hoursWorked !== undefined && hoursWorked !== null && hoursWorked !== '') {
+      hours = Number(hoursWorked)
+      if (!Number.isFinite(hours) || hours <= 0) {
+        return res.status(400).json({ message: 'Hours worked must be a positive number' })
+      }
+    }
+
+    const partsList = Array.isArray(rawParts) ? rawParts : []
+    const parsedParts = []
+    for (const raw of partsList) {
+      const productId = parseInt(raw?.productId, 10)
+      const quantity = parseInt(raw?.quantity, 10)
+      if (!Number.isInteger(productId) || !Number.isInteger(quantity) || quantity <= 0) {
+        return res.status(400).json({ message: 'Each part needs a valid product and quantity' })
+      }
+      parsedParts.push({ productId, quantity })
+    }
+
+    if (hours === null && parsedParts.length === 0) {
+      return res.status(400).json({ message: 'Log hours worked or at least one part used before billing.' })
+    }
+
+    await client.query('BEGIN')
+
+    // Reduce stock for every part fitted — same no-overselling check as a
+    // normal invoice, refusing (and rolling back) if anything's short.
+    const items = []
+    for (const part of parsedParts) {
+      const { rows: updated } = await client.query(
+        `UPDATE products SET quantity = quantity - $1 WHERE id = $2 AND quantity >= $1
+         RETURNING id, category, name, price`,
+        [part.quantity, part.productId]
+      )
+      if (updated.length === 0) {
+        const { rows: existing } = await client.query('SELECT name, quantity FROM products WHERE id = $1', [part.productId])
+        await client.query('ROLLBACK')
+        if (existing.length === 0) {
+          return res.status(400).json({ message: `Product ${part.productId} no longer exists in the catalogue.` })
+        }
+        return res.status(409).json({
+          message: `Not enough stock for "${existing[0].name}" — requested ${part.quantity}, only ${existing[0].quantity} left.`,
+        })
+      }
+      const product = updated[0]
+      items.push({
+        productId: product.id,
+        category: product.category,
+        name: product.name,
+        quantity: part.quantity,
+        catalPrice: Number(product.price),
+        finalPrice: Number(product.price),
+        sameAsCatalogue: true,
+      })
+    }
+
+    if (hours !== null) {
+      items.push({
+        productId: null,
+        category: 'Service',
+        name: `Labor (service charge) — ${hours} hr${hours === 1 ? '' : 's'}`,
+        quantity: hours,
+        catalPrice: LABOR_RATE_PER_HOUR,
+        finalPrice: LABOR_RATE_PER_HOUR,
+        sameAsCatalogue: true,
+      })
+    }
+
+    const { rate, subtotal, gstAmount, grandTotal } = computeGst(items, gstRate)
+
+    const received = amountReceived === undefined || amountReceived === null || amountReceived === ''
+      ? grandTotal
+      : Number(amountReceived)
+    if (!Number.isFinite(received) || received < 0) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ message: 'Invalid amount received' })
+    }
+    if (received > grandTotal + 0.01) {
+      await client.query('ROLLBACK')
+      return res.status(400).json({ message: 'Amount received cannot exceed the invoice total' })
+    }
+
+    const payment = typeof paymentMethod === 'string' && paymentMethod.trim() ? paymentMethod.trim() : null
+
+    const { rows: invRows } = await client.query(
+      `INSERT INTO invoices
+         (invoice_number, invoice_date, customer_name, customer_id, customer_phone, customer_address,
+          payment_method, ticket_number, items, subtotal, gst_rate, gst_amount, grand_total,
+          created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+       RETURNING id, invoice_number, invoice_date, customer_name, customer_phone, customer_address,
+                 payment_method, ticket_number, items, subtotal, gst_rate, gst_amount, grand_total, created_at`,
+      [
+        number, invoiceDate, ticket.customer_name || 'Walk-in', ticket.customer_id, ticket.customer_phone,
+        ticket.customer_address, payment, ticket.ticket_number, JSON.stringify(items), subtotal, rate, gstAmount,
+        grandTotal, req.user.id, req.user.username,
+      ]
+    )
+    const invoice = invRows[0]
+
+    if (received > 0) {
+      await client.query(
+        `INSERT INTO payments (invoice_id, amount, payment_method, payment_date, created_by_user_id, created_by_username)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [invoice.id, received, payment, invoiceDate, req.user.id, req.user.username]
+      )
+    }
+
+    const { rows: updatedTicketRows } = await client.query(
+      `UPDATE repair_tickets
+       SET hours_worked = $1, parts_used = $2, final_cost = $3, invoice_number = $4,
+           status = 'completed', completed_date = $5
+       WHERE id = $6
+       RETURNING id, ticket_number, status, final_cost, invoice_number, hours_worked, parts_used, completed_date`,
+      [hours, JSON.stringify(items.filter((i) => i.productId)), grandTotal, number, invoiceDate, id]
+    )
+
+    await client.query('COMMIT')
+
+    await logAudit(pool, {
+      user: req.user,
+      action: 'repair_ticket.bill',
+      entityType: 'repair_ticket',
+      entityId: id,
+      details: { invoiceNumber: number, grandTotal, hoursWorked: hours, partCount: parsedParts.length },
+    })
+
+    res.status(201).json({
+      invoice: { ...invoice, amount_paid: received, balance_due: grandTotal - received },
+      ticket: updatedTicketRows[0],
+    })
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (err.code === '23503') {
+      return res.status(400).json({ message: 'That customer no longer exists' })
+    }
+    console.error('POST /api/repair-tickets/:id/bill failed:', err)
+    res.status(500).json({ message: 'Could not bill this ticket' })
+  } finally {
+    client.release()
   }
 })
 
@@ -2189,7 +2435,7 @@ app.post('/api/invoices/:id/payments', requireAuth, requireRole('admin', 'sales'
 // line items, plus how much of each has already been returned via earlier
 // credit notes (summed from their stored items JSONB) so the frontend can
 // show — and the server can enforce — a per-line "returnable" ceiling.
-app.get('/api/invoices/:id/return-summary', requireAuth, async (req, res) => {
+app.get('/api/invoices/:id/return-summary', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10)
     if (!Number.isInteger(id)) {
@@ -2238,7 +2484,7 @@ app.get('/api/invoices/:id/return-summary', requireAuth, async (req, res) => {
   }
 })
 
-app.get('/api/invoices', requireAuth, async (req, res) => {
+app.get('/api/invoices', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
@@ -2433,7 +2679,7 @@ app.post('/api/credit-notes', requireAuth, requireRole('admin', 'sales'), async 
   }
 })
 
-app.get('/api/credit-notes', requireAuth, async (req, res) => {
+app.get('/api/credit-notes', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1)
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 20, 1), 100)
@@ -2483,7 +2729,7 @@ app.get('/api/credit-notes', requireAuth, async (req, res) => {
 
 // --- Dashboard summary ---
 
-app.get('/api/dashboard-summary', requireAuth, async (req, res) => {
+app.get('/api/dashboard-summary', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
   try {
     const [salesThisMonth, receivables, lowStock, openTickets, activeAmc, expiringAmc, recentInvoices] = await Promise.all([
       pool.query(

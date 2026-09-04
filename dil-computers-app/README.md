@@ -177,13 +177,61 @@ only the sections your role can use:
 | `admin` | Everything, including Users, the Audit Log, and HR/payroll editing |
 | `sales` | Browse the catalogue, create and view quotations/invoices/etc. |
 | `accountant` | View quotations/invoices/catalogue/HR/payroll (read-only) |
-| `staff` | Create-only: quotations and purchase orders. No list/view access to those or anything else — the narrowest role in the app |
+| `staff` | Create-only: quotations and purchase orders. No list/view access to those or anything else |
+| `technician` | Exactly one screen ("My Jobs") — only the repair tickets assigned to them, with a one-tap on-site billing action. The narrowest role in the app |
 
 Every restriction is enforced server-side (not just hidden in the UI) —
 each API route checks the role on the request's token. `staff` in
 particular is enforced at the API level, not just by hiding sidebar
 tabs: `GET /api/quotations` and `GET /api/purchase-orders` explicitly
 exclude it, so even a direct API call can't browse those lists.
+`technician` is scoped the same way but by row, not just by route: every
+repair-ticket query is filtered server-side to `assigned_to_username =
+<their own username>` (from the token, never a client-supplied filter),
+and a ticket that isn't theirs 404s rather than 403s, so a technician
+can't even confirm another technician's ticket exists by guessing its id.
+
+### On-site field service ("My Jobs")
+
+A `technician` logs in to a single screen listing only their assigned
+repair tickets. For each one they can:
+
+- Open the customer's address in Google Maps (a plain
+  `maps.google.com/search?query=...` deep link built from the saved
+  customer address — no GPS tracking, no paid mapping API).
+- Move the ticket's status along (e.g. "diagnosing" → "in repair") — the
+  only field a technician's `PATCH` on a ticket may touch; sending
+  anything else is a 403.
+- **Bill the job on the spot**, in one action
+  (`POST /api/repair-tickets/:id/bill`) that logs hours worked and/or
+  parts fitted, generates the invoice, records the payment, decrements
+  stock for any parts used, and marks the ticket completed — all in a
+  single database transaction, so there's no window between finishing
+  the work and the payment being on record.
+
+This is deliberately designed so a technician can never pocket the
+difference between what a customer paid and what gets recorded:
+
+- **A technician never enters or edits a price.** Labor is priced
+  automatically at a fixed shop-wide rate (`LABOR_RATE_PER_HOUR`) times
+  the hours they log; parts are always priced at the live catalogue
+  price, looked up fresh on the server at billing time — never something
+  the technician types in.
+- **No separate "delivery challan" step or float period.** Earlier
+  workflows for handing a technician spare parts (issue a DC, technician
+  collects the part, bills later) create a gap where a part or payment
+  can go unaccounted for. Here, picking a part *is* billing it — stock
+  and the invoice update together, immediately, with no intermediate
+  document to lose track of.
+- Every bill action is written to the **Audit Log** (`repair_ticket.bill`,
+  with the technician's username, the invoice total, hours, and part
+  count) — the existing audit trail doubles as the reconciliation record
+  for what each technician actually billed.
+
+Staff/admin assign a technician to a ticket from **Create Repair
+Ticket** or **Repair Tickets** (a dropdown fed by
+`GET /api/technicians`, admin/sales only — the account list `users`
+doesn't need to be exposed just to populate this).
 
 ### First login
 
@@ -207,6 +255,15 @@ It's a normal account from that point on — reset its password, deactivate
 it, or change its role from **Users** like any other. The seed step won't
 recreate it once it exists, so those changes stick across deploys.
 
+Three default `technician` demo accounts are created the same way:
+
+- Usernames: `tech1`, `tech2`, `tech3`
+- Password (all three): `tech123`
+
+Same idempotent-per-username behavior as `staff1` — each is only created
+if that exact username doesn't already exist, so changing or deactivating
+one through **Users** sticks across deploys/re-seeds.
+
 ## Environment variables
 
 | Variable | Required | Notes |
@@ -216,6 +273,7 @@ recreate it once it exists, so those changes stick across deploys.
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | No | Override the hardcoded login. |
 | `PGSSL` | No | Set to `disable` to turn off SSL for a local Postgres. Defaults to Railway-friendly SSL (`rejectUnauthorized: false`). |
 | `COMPANY_NAME` / `COMPANY_GSTIN` / `COMPANY_ADDRESS` | No | Printed on every quotation/invoice PDF header. `COMPANY_NAME` defaults to "DIL Computers"; the other two are blank (omitted from the PDF) if unset. |
+| `LABOR_RATE_PER_HOUR` | No | ₹/hour rate used to price a technician's on-site labor billing (`POST /api/repair-tickets/:id/bill`). Defaults to `100`. Read-only from the client via `GET /api/company-info` — never sent by or editable from the technician's device. |
 
 ## Local development
 
@@ -320,13 +378,20 @@ that's the only status actually stored as a boolean.
 **`repair_tickets`** — service tickets for devices dropped off for
 repair, written by `POST /api/repair-tickets`. Links to a saved
 `customer_id` (required) and, optionally, an `amc_contract_id` if the
-repair is covered under a contract. `status` moves through `received` →
-`diagnosing` → `waiting_for_parts` → `in_repair` → `ready_for_pickup` →
-`completed`/`cancelled`. `invoice_number` is a free-text reference (same
-pattern as `invoices.quotation_number`) set once the repair is billed —
-a ticket doesn't carry its own line items. `warranty_days` is the shop's
-own warranty on the completed repair work, separate from any product
-warranty.
+repair is covered under a contract, and an `assigned_to_username` (a
+technician's login — see "On-site field service" above). `status` moves
+through `received` → `diagnosing` → `waiting_for_parts` → `in_repair` →
+`ready_for_pickup` → `completed`/`cancelled`. `invoice_number` is a
+free-text reference (same pattern as `invoices.quotation_number`) set
+once the repair is billed — a ticket doesn't carry its own line items.
+`warranty_days` is the shop's own warranty on the completed repair work,
+separate from any product warranty. `hours_worked` and `parts_used` are
+set only by the on-site billing action (`POST
+/api/repair-tickets/:id/bill`) — a snapshot of what that one billing
+action charged for (parts mirror invoice line-item shape: category,
+name, quantity, price; labor itself isn't in `parts_used`, only
+`hours_worked`), informational alongside the real record of it in
+`invoices.items`.
 
 **`credit_notes`** — returns against a specific invoice, written by
 `POST /api/credit-notes`. Unlike `quotation_number`/`ticket_number`,
@@ -344,11 +409,12 @@ name/quantity/cost price per line; creating one increases the referenced
 products' `quantity` and sets their `cost_price` in the same transaction.
 
 **`users`** — accounts, bcrypt-hashed passwords, and a `role` (`admin` /
-`sales` / `accountant` / `staff`). A bootstrap admin is inserted
-automatically the first time the app runs against an empty `users` table,
-and a default `staff1` account is inserted on any database that doesn't
-already have one (see "First login" above); every account after that is
-created through the Users section.
+`sales` / `accountant` / `staff` / `technician`). A bootstrap admin is
+inserted automatically the first time the app runs against an empty
+`users` table, and default `staff1`/`tech1`/`tech2`/`tech3` accounts are
+inserted on any database that doesn't already have them (see "First
+login" above); every account after that is created through the Users
+section.
 
 **`staff_members`** and **`payroll_records`** — the HR roster and its
 payment history, written by `POST /api/staff` and `POST /api/payroll`.
@@ -378,9 +444,9 @@ can't drift out of sync with the payments actually on record.
 `quotation.create`, `invoice.create`, `customer.create`, `customer.update`,
 `payment.record`, `product.update`, `supplier.create`, `supplier.update`,
 `purchase_order.create`, `amc_contract.create`, `amc_contract.update`,
-`repair_ticket.create`, `repair_ticket.update`, `credit_note.create`,
-`product.bulk_import`, `staff.create`, `staff.update`, `payroll.create`,
-`customer.tag`),
+`repair_ticket.create`, `repair_ticket.update`, `repair_ticket.bill`,
+`credit_note.create`, `product.bulk_import`, `staff.create`,
+`staff.update`, `payroll.create`, `customer.tag`),
 who did it, and a small JSON detail snapshot. `user_id` is nullable (`ON DELETE SET NULL`) so
 deleting an account, if that's ever added, wouldn't take its history with
 it — `username` is kept alongside as a permanent snapshot either way.

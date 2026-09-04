@@ -22,14 +22,20 @@ import CatalogueImportExport from './CatalogueImportExport'
 import StaffMonitoring from './StaffMonitoring'
 import PayrollCompensation from './PayrollCompensation'
 import CustomerInsights from './CustomerInsights'
+import TechnicianJobs from './TechnicianJobs'
 
 // Which roles see each tab, grouped for the sidebar. 'staff' is
 // deliberately narrow — create-only access to quotations and purchase
-// orders, nothing else (no view lists, no other section). 'sales' can
+// orders, nothing else (no view lists, no other section). 'technician' is
+// narrower still — exactly one tab, showing only repair tickets assigned
+// to them, with a one-tap on-site billing action (server-priced, never
+// technician-entered — see /api/repair-tickets/:id/bill). 'sales' can
 // create and view sales/purchasing/service documents; 'accountant' can
 // view financial and HR records read-only; 'admin' sees everything,
 // including Users, the Audit Log, and HR editing.
 const TABS = [
+  { id: 'myJobs', label: 'My Jobs', group: 'Field Service', roles: ['technician'], Component: TechnicianJobs },
+
   { id: 'overview', label: 'Overview', group: 'Overview', roles: ['admin', 'sales', 'accountant'], Component: Overview },
   { id: 'customerInsights', label: 'Customer Insights', group: 'Insights', roles: ['admin'], Component: CustomerInsights },
 
@@ -61,7 +67,7 @@ const TABS = [
   { id: 'audit', label: 'Audit Log', group: 'Admin', roles: ['admin'], Component: AuditLog },
 ]
 
-const GROUP_ORDER = ['Overview', 'Insights', 'Sales', 'Purchasing', 'Catalogue', 'Service', 'HR', 'Admin']
+const GROUP_ORDER = ['Field Service', 'Overview', 'Insights', 'Sales', 'Purchasing', 'Catalogue', 'Service', 'HR', 'Admin']
 
 export default function Dashboard({ token, user, onLogout }) {
   const visibleTabs = TABS.filter((t) => t.roles.includes(user.role))

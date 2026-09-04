@@ -118,6 +118,31 @@ async function ensureDefaultStaffAccount(client) {
   console.log(`Created default staff account "${STAFF_USERNAME}".`)
 }
 
+// Default demo accounts for the "technician" role (their own scoped view
+// of just the repair tickets assigned to them, plus the one-tap on-site
+// billing action — see server/index.js). Same idempotent-per-username
+// pattern as the staff account above.
+const TECHNICIAN_USERNAMES = ['tech1', 'tech2', 'tech3']
+const TECHNICIAN_PASSWORD = 'tech123'
+
+async function ensureDefaultTechnicianAccounts(client) {
+  for (const username of TECHNICIAN_USERNAMES) {
+    const { rows } = await client.query('SELECT id FROM users WHERE username = $1', [username])
+    if (rows.length > 0) {
+      console.log(`"${username}" account already exists — skipping.`)
+      continue
+    }
+
+    const passwordHash = await hashPassword(TECHNICIAN_PASSWORD)
+    await client.query(
+      `INSERT INTO users (username, password_hash, full_name, role)
+       VALUES ($1, $2, $3, 'technician')`,
+      [username, passwordHash, `Technician (${username})`]
+    )
+    console.log(`Created default technician account "${username}".`)
+  }
+}
+
 // --- Temporary demo data for trying out Customer Insights against the
 // live app. Guarded by env vars so it never runs by default; every row it
 // creates is unmistakably prefixed "[TEST] " so it's easy to spot and
@@ -343,6 +368,7 @@ async function main() {
 
     await ensureBootstrapAdmin(client)
     await ensureDefaultStaffAccount(client)
+    await ensureDefaultTechnicianAccounts(client)
 
     if (process.env.CLEANUP_SAMPLE_DATA === 'true') {
       await cleanupSampleCustomerData(client)
