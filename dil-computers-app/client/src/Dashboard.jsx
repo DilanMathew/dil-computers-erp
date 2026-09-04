@@ -24,6 +24,7 @@ import PayrollCompensation from './PayrollCompensation'
 import CustomerInsights from './CustomerInsights'
 import TechnicianJobs from './TechnicianJobs'
 import WarrantyLookup from './WarrantyLookup'
+import Receivables from './Receivables'
 
 // Which roles see each tab, grouped for the sidebar. 'staff' is
 // deliberately narrow — create-only access to quotations and purchase
@@ -46,6 +47,7 @@ const TABS = [
   { id: 'invoices', label: 'Invoices', group: 'Sales', roles: ['admin', 'sales', 'accountant'], Component: Invoices },
   { id: 'creditNote', label: 'Create Credit Note', group: 'Sales', roles: ['admin', 'sales'], Component: CreateCreditNote },
   { id: 'creditNotes', label: 'Credit Notes', group: 'Sales', roles: ['admin', 'sales', 'accountant'], Component: CreditNotes },
+  { id: 'receivables', label: 'Receivables', group: 'Sales', roles: ['admin', 'sales', 'accountant'], Component: Receivables },
   { id: 'customers', label: 'Customers', group: 'Sales', roles: ['admin', 'sales', 'accountant'], Component: Customers },
 
   { id: 'purchaseOrder', label: 'Create Purchase Order', group: 'Purchasing', roles: ['admin', 'sales', 'staff'], Component: CreatePurchaseOrder },

@@ -154,6 +154,7 @@ export default function Invoices({ token, user, onLogout }) {
           <option value="paid">Paid</option>
           <option value="partial">Partially paid</option>
           <option value="unpaid">Unpaid</option>
+          <option value="overdue">Overdue</option>
         </select>
       </div>
 
@@ -194,7 +195,14 @@ export default function Invoices({ token, user, onLogout }) {
                     <td style={styles.td}>{inv.customer_name}</td>
                     <td style={styles.td}>{inv.quotation_number || '—'}</td>
                     <td style={styles.td}>{inv.created_by_username || '—'}</td>
-                    <td style={styles.td}><StatusBadge status={inv.status} /></td>
+                    <td style={styles.td}>
+                      <StatusBadge status={inv.status} />
+                      {inv.days_overdue != null && (
+                        <span style={styles.overdueBadge}>
+                          {inv.days_overdue}d overdue
+                        </span>
+                      )}
+                    </td>
                     <td style={{ ...styles.td, textAlign: 'right' }}>{formatPrice(inv.grand_total)}</td>
                     <td style={{ ...styles.td, textAlign: 'right' }}>
                       {Number(inv.balance_due) > 0.01 ? formatPrice(inv.balance_due) : '—'}
@@ -315,6 +323,17 @@ export default function Invoices({ token, user, onLogout }) {
 }
 
 const styles = {
+  overdueBadge: {
+    display: 'inline-block',
+    marginLeft: 6,
+    padding: '2px 7px',
+    borderRadius: 999,
+    background: '#fee2e2',
+    color: '#991b1b',
+    fontSize: 10.5,
+    fontWeight: 700,
+    whiteSpace: 'nowrap',
+  },
   header: {
     marginBottom: 20,
   },

@@ -194,6 +194,18 @@ const DUPLICATE_NUMBER_LABELS = {
   credit_notes_credit_note_number_unique: 'credit note number',
 }
 
+// Credit terms: days after the invoice date that payment falls due.
+// Blank/null is meaningful here — it means "due on receipt", the ordinary
+// walk-in case — so it's accepted rather than treated as a missing value.
+function parsePaymentTerms(raw) {
+  if (raw === undefined || raw === null || raw === '') return { value: null }
+  const days = Number(raw)
+  if (!Number.isInteger(days) || days < 0 || days > 365) {
+    return { error: 'Payment terms must be a whole number of days between 0 and 365' }
+  }
+  return { value: days }
+}
+
 function duplicateNumberMessage(err) {
   if (err?.code !== '23505') return null
   const label = DUPLICATE_NUMBER_LABELS[err.constraint]
@@ -258,6 +270,63 @@ app.get('/api/next-document-number', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('GET /api/next-document-number failed:', err)
     res.status(500).json({ message: 'Could not generate a document number' })
+  }
+})
+
+// Receivables aging: every invoice still owing money, bucketed by how far
+// past its due date it is. An invoice with no due date was due on receipt,
+// so its invoice date stands in — which means a cash sale that was never
+// paid shows as overdue from day one, as it should.
+//
+// Buckets follow the usual aging convention: not yet due, then 1-30,
+// 31-60, 61-90 and 90+ days past due.
+app.get('/api/receivables-aging', requireAuth, requireRole('admin', 'sales', 'accountant'), async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT i.id, i.invoice_number, i.invoice_date, i.due_date,
+              i.customer_id, i.customer_name, i.customer_phone,
+              i.grand_total,
+              COALESCE(pay.paid, 0) AS amount_paid,
+              i.grand_total - COALESCE(pay.paid, 0) AS balance_due,
+              COALESCE(i.due_date, i.invoice_date) AS effective_due_date,
+              GREATEST(CURRENT_DATE - COALESCE(i.due_date, i.invoice_date), 0) AS days_overdue,
+              CASE
+                WHEN COALESCE(i.due_date, i.invoice_date) >= CURRENT_DATE THEN 'not_due'
+                WHEN CURRENT_DATE - COALESCE(i.due_date, i.invoice_date) <= 30 THEN 'd1_30'
+                WHEN CURRENT_DATE - COALESCE(i.due_date, i.invoice_date) <= 60 THEN 'd31_60'
+                WHEN CURRENT_DATE - COALESCE(i.due_date, i.invoice_date) <= 90 THEN 'd61_90'
+                ELSE 'd90_plus'
+              END AS bucket
+         FROM invoices i
+         LEFT JOIN LATERAL (
+           SELECT SUM(amount) AS paid FROM payments WHERE invoice_id = i.id
+         ) pay ON true
+        WHERE i.grand_total - COALESCE(pay.paid, 0) > 0.01
+        ORDER BY COALESCE(i.due_date, i.invoice_date) ASC, i.id ASC`
+    )
+
+    const buckets = { not_due: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0 }
+    let totalOutstanding = 0
+    let totalOverdue = 0
+    for (const row of rows) {
+      const balance = Number(row.balance_due)
+      buckets[row.bucket] += balance
+      totalOutstanding += balance
+      if (row.bucket !== 'not_due') totalOverdue += balance
+    }
+    for (const key of Object.keys(buckets)) {
+      buckets[key] = Math.round(buckets[key] * 100) / 100
+    }
+
+    res.json({
+      invoices: rows,
+      buckets,
+      totalOutstanding: Math.round(totalOutstanding * 100) / 100,
+      totalOverdue: Math.round(totalOverdue * 100) / 100,
+    })
+  } catch (err) {
+    console.error('GET /api/receivables-aging failed:', err)
+    res.status(500).json({ message: 'Could not load receivables' })
   }
 })
 
@@ -583,7 +652,7 @@ app.get('/api/customers', requireAuth, requireRole('admin', 'sales', 'accountant
     params.push(pageSize)
     params.push(offset)
     const itemsResult = await pool.query(
-      `SELECT id, name, phone, email, address, notes, created_by_username, created_at
+      `SELECT id, name, phone, email, address, notes, payment_terms_days, created_by_username, created_at
        FROM customers
        ${where}
        ORDER BY name ASC
@@ -612,7 +681,7 @@ app.get('/api/customers/:id', requireAuth, requireRole('admin', 'sales', 'accoun
     }
 
     const { rows } = await pool.query(
-      `SELECT id, name, phone, email, address, notes, created_by_username, created_at
+      `SELECT id, name, phone, email, address, notes, payment_terms_days, created_by_username, created_at
        FROM customers WHERE id = $1`,
       [id]
     )
@@ -642,19 +711,24 @@ app.get('/api/customers/:id', requireAuth, requireRole('admin', 'sales', 'accoun
 
 app.post('/api/customers', requireAuth, requireRole('admin', 'sales'), async (req, res) => {
   try {
-    const { name, phone, email, address, notes } = req.body || {}
+    const { name, phone, email, address, notes, paymentTermsDays } = req.body || {}
     const trimmedName = typeof name === 'string' ? name.trim() : ''
     if (!trimmedName) {
       return res.status(400).json({ message: 'Customer name is required' })
     }
 
+    const terms = parsePaymentTerms(paymentTermsDays)
+    if (terms.error) {
+      return res.status(400).json({ message: terms.error })
+    }
+
     const clean = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
 
     const { rows } = await pool.query(
-      `INSERT INTO customers (name, phone, email, address, notes, created_by_user_id, created_by_username)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, name, phone, email, address, notes, created_by_username, created_at`,
-      [trimmedName, clean(phone), clean(email), clean(address), clean(notes), req.user.id, req.user.username]
+      `INSERT INTO customers (name, phone, email, address, notes, payment_terms_days, created_by_user_id, created_by_username)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, name, phone, email, address, notes, payment_terms_days, created_by_username, created_at`,
+      [trimmedName, clean(phone), clean(email), clean(address), clean(notes), terms.value, req.user.id, req.user.username]
     )
     const customer = rows[0]
 
@@ -698,6 +772,17 @@ app.patch('/api/customers/:id', requireAuth, requireRole('admin', 'sales'), asyn
       }
     }
 
+    // Clearing terms back to "due on receipt" is a real edit, so an
+    // explicit null/'' counts as a change rather than a no-op.
+    if ('paymentTermsDays' in (req.body || {})) {
+      const terms = parsePaymentTerms(req.body.paymentTermsDays)
+      if (terms.error) {
+        return res.status(400).json({ message: terms.error })
+      }
+      params.push(terms.value)
+      sets.push(`payment_terms_days = $${params.length}`)
+    }
+
     if (sets.length === 0) {
       return res.status(400).json({ message: 'Nothing to update' })
     }
@@ -705,7 +790,7 @@ app.patch('/api/customers/:id', requireAuth, requireRole('admin', 'sales'), asyn
     params.push(id)
     const { rows } = await pool.query(
       `UPDATE customers SET ${sets.join(', ')} WHERE id = $${params.length}
-       RETURNING id, name, phone, email, address, notes, created_by_username, created_at`,
+       RETURNING id, name, phone, email, address, notes, payment_terms_days, created_by_username, created_at`,
       params
     )
     if (rows.length === 0) {
@@ -735,10 +820,9 @@ app.patch('/api/customers/:id', requireAuth, requireRole('admin', 'sales'), asyn
 // one exception: a manual override a person sets by hand when the numbers
 // don't tell the whole story.
 //
-// "Late" is a 30-day proxy (no due-date/credit-terms concept exists yet):
-// an invoice counts as late if it took more than 30 days from invoice_date
-// to be paid in full, or if it's still unpaid/partial and is already more
-// than 30 days old.
+// "Late" is measured against each invoice's own due date, which comes from
+// the customer's agreed credit terms at the time it was issued. An invoice
+// with no due date was due on receipt, so its invoice date stands in.
 
 const CUSTOMER_INSIGHTS_CTE = `
   WITH invoice_stats AS (
@@ -750,11 +834,12 @@ const CUSTOMER_INSIGHTS_CTE = `
       MIN(i.invoice_date) AS first_purchase_date,
       MAX(i.invoice_date) AS last_purchase_date,
       SUM(i.grand_total - COALESCE(pay.paid, 0)) AS outstanding_balance,
-      SUM(CASE WHEN i.invoice_date <= CURRENT_DATE - INTERVAL '30 days' AND (i.grand_total - COALESCE(pay.paid, 0)) > 0.01
+      SUM(CASE WHEN COALESCE(i.due_date, i.invoice_date) < CURRENT_DATE AND (i.grand_total - COALESCE(pay.paid, 0)) > 0.01
                THEN i.grand_total - COALESCE(pay.paid, 0) ELSE 0 END) AS overdue_amount,
       COUNT(*) FILTER (
-        WHERE ((i.grand_total - COALESCE(pay.paid, 0)) <= 0.01 AND pay.last_payment_date IS NOT NULL AND (pay.last_payment_date - i.invoice_date) > 30)
-           OR ((i.grand_total - COALESCE(pay.paid, 0)) > 0.01 AND i.invoice_date <= CURRENT_DATE - INTERVAL '30 days')
+        WHERE ((i.grand_total - COALESCE(pay.paid, 0)) <= 0.01 AND pay.last_payment_date IS NOT NULL
+               AND pay.last_payment_date > COALESCE(i.due_date, i.invoice_date))
+           OR ((i.grand_total - COALESCE(pay.paid, 0)) > 0.01 AND COALESCE(i.due_date, i.invoice_date) < CURRENT_DATE)
       ) AS late_payment_count,
       AVG(pay.last_payment_date - i.invoice_date) FILTER (
         WHERE (i.grand_total - COALESCE(pay.paid, 0)) <= 0.01 AND pay.last_payment_date IS NOT NULL
@@ -2476,6 +2561,7 @@ app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req
       items: rawItems,
       amountReceived,
       gstRate,
+      dueDate,
     } = req.body || {}
 
     const number = typeof invoiceNumber === 'string' ? invoiceNumber.trim() : ''
@@ -2500,6 +2586,31 @@ app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req
       custId = parseInt(customerId, 10)
       if (!Number.isInteger(custId)) {
         return res.status(400).json({ message: 'Invalid customer reference' })
+      }
+    }
+
+    // When the caller doesn't name a due date, fall back to the saved
+    // customer's agreed terms. A walk-in with no saved record, or a
+    // customer with no terms set, leaves this null — due on receipt.
+    let due = null
+    if (dueDate !== undefined && dueDate !== null && dueDate !== '') {
+      if (!isValidDateString(dueDate)) {
+        return res.status(400).json({ message: 'A valid due date (YYYY-MM-DD) is required' })
+      }
+      if (dueDate < invoiceDate) {
+        return res.status(400).json({ message: 'Due date cannot be before the invoice date' })
+      }
+      due = dueDate
+    } else if (custId != null) {
+      const { rows: termRows } = await client.query(
+        'SELECT payment_terms_days FROM customers WHERE id = $1',
+        [custId]
+      )
+      const days = termRows[0]?.payment_terms_days
+      if (Number.isInteger(days) && days > 0) {
+        const d = new Date(`${invoiceDate}T00:00:00Z`)
+        d.setUTCDate(d.getUTCDate() + days)
+        due = d.toISOString().slice(0, 10)
       }
     }
 
@@ -2554,15 +2665,15 @@ app.post('/api/invoices', requireAuth, requireRole('admin', 'sales'), async (req
 
     const { rows } = await client.query(
       `INSERT INTO invoices
-         (invoice_number, invoice_date, customer_name, customer_id, customer_phone, customer_address,
+         (invoice_number, invoice_date, due_date, customer_name, customer_id, customer_phone, customer_address,
           payment_method, quotation_number, ticket_number, items, subtotal, gst_rate, gst_amount, grand_total,
           created_by_user_id, created_by_username)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-       RETURNING id, invoice_number, invoice_date, customer_name, customer_phone, customer_address,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       RETURNING id, invoice_number, invoice_date, due_date, customer_name, customer_phone, customer_address,
                  payment_method, quotation_number, ticket_number, items, subtotal, gst_rate, gst_amount,
                  grand_total, created_by_username, created_at`,
       [
-        number, invoiceDate, customer, custId, phone, address, payment, refQuotation, refTicket,
+        number, invoiceDate, due, customer, custId, phone, address, payment, refQuotation, refTicket,
         JSON.stringify(validation.items), subtotal, rate, gstAmount, grandTotal, req.user.id, req.user.username,
       ]
     )
@@ -2738,6 +2849,15 @@ app.get('/api/invoices', requireAuth, requireRole('admin', 'sales', 'accountant'
         END
       ) = $${params.length}`
     }
+    // Overdue cuts across paid/partial/unpaid: anything still owing whose
+    // due date has passed. An invoice with no due date is due on receipt,
+    // so its invoice date stands in.
+    if (req.query.status === 'overdue') {
+      where += `${where ? ' AND' : 'WHERE'} (
+        (i.grand_total - COALESCE(pay.paid, 0)) > 0.01
+        AND COALESCE(i.due_date, i.invoice_date) < CURRENT_DATE
+      )`
+    }
 
     const countResult = await pool.query(
       `SELECT COUNT(*)::int AS total
@@ -2751,10 +2871,14 @@ app.get('/api/invoices', requireAuth, requireRole('admin', 'sales', 'accountant'
     params.push(pageSize)
     params.push(offset)
     const itemsResult = await pool.query(
-      `SELECT i.id, i.invoice_number, i.invoice_date, i.customer_name, i.customer_id, i.customer_phone,
+      `SELECT i.id, i.invoice_number, i.invoice_date, i.due_date, i.customer_name, i.customer_id, i.customer_phone,
               i.customer_address, i.payment_method, i.quotation_number, i.ticket_number, i.items,
               i.subtotal, i.gst_rate, i.gst_amount, i.grand_total,
               i.created_by_username, i.created_at,
+              CASE WHEN (i.grand_total - COALESCE(pay.paid, 0)) > 0.01
+                        AND COALESCE(i.due_date, i.invoice_date) < CURRENT_DATE
+                   THEN (CURRENT_DATE - COALESCE(i.due_date, i.invoice_date))
+                   ELSE NULL END AS days_overdue,
               COALESCE(pay.paid, 0) AS amount_paid,
               i.grand_total - COALESCE(pay.paid, 0) AS balance_due,
               CASE

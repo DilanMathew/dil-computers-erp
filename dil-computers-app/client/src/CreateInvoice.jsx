@@ -22,6 +22,10 @@ export default function CreateInvoice({ token, onLogout }) {
   const [gstRate, setGstRate] = useState(18)
   const [fullyPaid, setFullyPaid] = useState(true)
   const [amountReceived, setAmountReceived] = useState('')
+  // Only meaningful when money is still owed. Prefilled from the saved
+  // customer's agreed credit terms when one is picked; the server falls
+  // back to those terms anyway if this is left blank.
+  const [dueDate, setDueDate] = useState('')
 
   const [quotationQuery, setQuotationQuery] = useState('')
   const [quotationSuggestions, setQuotationSuggestions] = useState([])
@@ -155,6 +159,7 @@ export default function CreateInvoice({ token, onLogout }) {
           ticketNumber: ticketQuery,
           items: lineItems,
           amountReceived: received,
+          dueDate: fullyPaid ? null : (dueDate || null),
           gstRate,
         }),
       })
@@ -201,6 +206,7 @@ export default function CreateInvoice({ token, onLogout }) {
       setPaymentMethod(PAYMENT_METHODS[0])
       setFullyPaid(true)
       setAmountReceived('')
+      setDueDate('')
       setQuotationQuery('')
       setTicketQuery('')
       refreshInvoiceNumber()
@@ -285,6 +291,14 @@ export default function CreateInvoice({ token, onLogout }) {
             setCustomerId(customer.id)
             if (customer.phone) setCustomerPhone(customer.phone)
             if (customer.address) setCustomerAddress(customer.address)
+            const terms = customer.payment_terms_days
+            if (Number.isInteger(terms) && terms > 0) {
+              const d = new Date(`${invoiceDate}T00:00:00Z`)
+              d.setUTCDate(d.getUTCDate() + terms)
+              setDueDate(d.toISOString().slice(0, 10))
+            } else {
+              setDueDate('')
+            }
           }}
         />
         <div>
@@ -416,8 +430,22 @@ export default function CreateInvoice({ token, onLogout }) {
                 onChange={(e) => setAmountReceived(e.target.value)}
               />
             </div>
+            <div>
+              <label style={styles.label} htmlFor="dueDate">Payment due by</label>
+              <input
+                id="dueDate"
+                style={styles.input}
+                type="date"
+                min={invoiceDate}
+                value={dueDate}
+                onChange={(e) => setDueDate(e.target.value)}
+              />
+            </div>
             <div style={styles.balanceNote}>
               Balance due: {formatPrice(Math.max(grandTotal - (Number(amountReceived) || 0), 0))}
+              <div style={styles.dueHint}>
+                {dueDate ? `Overdue after ${dueDate}.` : 'No date set — treated as due on receipt.'}
+              </div>
             </div>
           </div>
         )}
@@ -449,6 +477,7 @@ export default function CreateInvoice({ token, onLogout }) {
 }
 
 const styles = {
+  dueHint: { fontSize: 11, color: '#64748b', marginTop: 4, fontWeight: 400 },
   header: {
     marginBottom: 20,
   },
