@@ -21,6 +21,14 @@ export default function CreateRepairTicket({ token, onLogout }) {
   const [technicians, setTechnicians] = useState([])
   const [assignedToUsername, setAssignedToUsername] = useState('')
 
+  // Filled in only when the typed customer isn't one we have on file — the
+  // ticket then creates the customer record too (see POST /api/repair-tickets).
+  const [newCustomerPhone, setNewCustomerPhone] = useState('')
+  const [newCustomerAddress, setNewCustomerAddress] = useState('')
+
+  // A name typed but not picked from the dropdown means "not on file yet".
+  const isNewCustomer = Boolean(customerName.trim()) && !customerId
+
   const [formError, setFormError] = useState('')
   const [successMessage, setSuccessMessage] = useState('')
   const [saving, setSaving] = useState(false)
@@ -66,8 +74,8 @@ export default function CreateRepairTicket({ token, onLogout }) {
       setFormError('Ticket number is required.')
       return
     }
-    if (!customerId) {
-      setFormError('Pick a saved customer for this ticket.')
+    if (!customerId && !customerName.trim()) {
+      setFormError('Enter a customer — pick a saved one, or type a new name to add them.')
       return
     }
     if (!deviceDescription.trim()) {
@@ -81,12 +89,19 @@ export default function CreateRepairTicket({ token, onLogout }) {
 
     setSaving(true)
     try {
-      const { ticket } = await apiFetch('/api/repair-tickets', token, {
+      const { ticket, customer } = await apiFetch('/api/repair-tickets', token, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ticketNumber: ticketNumber.trim(),
           customerId,
+          newCustomer: isNewCustomer
+            ? {
+                name: customerName.trim(),
+                phone: newCustomerPhone,
+                address: newCustomerAddress,
+              }
+            : undefined,
           deviceDescription: deviceDescription.trim(),
           serialNumber,
           reportedIssue: reportedIssue.trim(),
@@ -97,12 +112,18 @@ export default function CreateRepairTicket({ token, onLogout }) {
         }),
       })
 
-      setSuccessMessage(`Ticket ${ticket.ticket_number} saved. Update its status from the Repair Tickets list as work progresses.`)
+      setSuccessMessage(
+        customer
+          ? `Ticket ${ticket.ticket_number} saved, and "${customer.name}" was added to Customers.`
+          : `Ticket ${ticket.ticket_number} saved. Update its status from the Repair Tickets list as work progresses.`
+      )
 
       setTicketNumber(generateDocumentNumber('TKT'))
       setReceivedDate(todayIso())
       setCustomerName('')
       setCustomerId(null)
+      setNewCustomerPhone('')
+      setNewCustomerAddress('')
       setDeviceDescription('')
       setSerialNumber('')
       setReportedIssue('')
@@ -165,7 +186,7 @@ export default function CreateRepairTicket({ token, onLogout }) {
             setCustomerName(customer.name)
             setCustomerId(customer.id)
           }}
-          emptyMessage="No matching customers — add one from the Customers section first."
+          emptyMessage="No match — keep typing to add them as a new customer."
         />
         <div>
           <label style={styles.label} htmlFor="serialNumber">Serial number (optional)</label>
@@ -240,6 +261,41 @@ export default function CreateRepairTicket({ token, onLogout }) {
         </div>
       </div>
 
+      {isNewCustomer && (
+        <div style={styles.newCustomerPanel}>
+          <div style={styles.newCustomerTitle}>
+            New customer — “{customerName.trim()}” will be added to Customers
+          </div>
+          <div style={styles.newCustomerGrid}>
+            <div>
+              <label style={styles.label} htmlFor="newCustomerPhone">Phone</label>
+              <input
+                id="newCustomerPhone"
+                style={styles.input}
+                type="text"
+                placeholder="Contact number"
+                value={newCustomerPhone}
+                onChange={(e) => setNewCustomerPhone(e.target.value)}
+              />
+            </div>
+            <div>
+              <label style={styles.label} htmlFor="newCustomerAddress">Address</label>
+              <input
+                id="newCustomerAddress"
+                style={styles.input}
+                type="text"
+                placeholder="Where the technician should go"
+                value={newCustomerAddress}
+                onChange={(e) => setNewCustomerAddress(e.target.value)}
+              />
+            </div>
+          </div>
+          <div style={styles.newCustomerHint}>
+            Both are optional, but the address is what the technician opens in Maps for an on-site job.
+          </div>
+        </div>
+      )}
+
       <div>
         <label style={styles.label} htmlFor="deviceDescription">Device description</label>
         <input
@@ -312,6 +368,29 @@ const styles = {
     background: '#fff',
     resize: 'vertical',
     fontFamily: 'inherit',
+  },
+  newCustomerPanel: {
+    border: '1px solid #bfdbfe',
+    background: '#eff6ff',
+    borderRadius: 8,
+    padding: 14,
+    marginBottom: 12,
+  },
+  newCustomerTitle: {
+    fontSize: 13,
+    fontWeight: 700,
+    color: '#1e3a8a',
+    marginBottom: 10,
+  },
+  newCustomerGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+    gap: 12,
+  },
+  newCustomerHint: {
+    marginTop: 8,
+    fontSize: 12,
+    color: '#475569',
   },
   suggestions: {
     position: 'absolute',
