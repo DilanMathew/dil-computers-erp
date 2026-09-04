@@ -11,6 +11,15 @@ only the sections your role can use:
   days), plus the 5 most recent invoices. All figures are computed live
   from the same data the other sections show — nothing here is a separate
   stored total that could drift.
+- **Sales Analytics** *(admin, sales, accountant)* — charts for a chosen
+  month: revenue and invoice count as headline stats, daily revenue,
+  revenue by category, the last 6 months trending into the selected one,
+  and the top 10 customers by spend. Built on `GET /api/sales-analytics`,
+  which aggregates directly from `invoices` — nothing here is a separately
+  stored total. One accent color throughout: every chart compares
+  magnitude ("how much"), not identity, so a categorical palette would
+  assign meaningless color where the axis labels already do the
+  distinguishing work.
 - **Customer Insights** *(admin only)* — a ranked leaderboard of every
   customer with at least one invoice: total spend, invoice count, average
   order value, last purchase date, outstanding balance, and a computed
@@ -407,6 +416,46 @@ breaking old invoices that cite it). Both carry
 `created_by_user_id`/`created_by_username` and an optional `customer_id`
 — linking a saved customer is optional either way, so a walk-in sale with
 no saved record works exactly as before.
+
+### Real April 2026 sales, imported from Tally
+
+`server/data/april_2026_sales.csv` — 128 real invoices, one-time imported
+from a Tally "Sales - GST Register" export covering 1–30 April 2026
+(₹15,74,156.50 across 87 customers). `server/db/seed.js`'s
+`importAprilSales` runs this on every deploy and is idempotent per
+invoice number, so it only ever inserts what isn't there yet.
+
+Worth knowing about this batch specifically:
+
+- **The source is a party-wise register, not itemized invoices** — one
+  total per voucher, no product-level detail, no GST rate. Each invoice
+  therefore has a single line item named for its voucher type (Sales /
+  Service / AMC Maintenance / Rental Income) rather than real products,
+  and GST was backed out of the total at a flat **18%** — confirmed with
+  the business owner, since the source data doesn't state a rate and this
+  app never assumes one.
+- **It bypasses the normal `POST /api/invoices` flow deliberately.** That
+  route requires every line item to reference a real catalogue product
+  and decrements its stock — correct for a live sale, wrong for a
+  historical import with no per-unit inventory movement to model.
+  Recording these through the live route would have meant either
+  inventing a fake product to decrement 128 times (corrupting real stock
+  for no reason) or leaving stock untouched while lying about what was
+  sold. The importer writes directly to `invoices`/`payments`/`customers`
+  instead, matching the same shape the live route produces.
+- **Recorded as paid in full**, since a Tally sales register reflects
+  issued, recognized invoices and there's no separate receipts sheet to
+  say otherwise; payment method is left blank rather than guessed.
+- A new customer record (name only — that's all the source has) is
+  created for each party not already on file, matched by exact name so
+  a re-run doesn't duplicate them.
+- Two of the four voucher types — `AMC-ANNUAL MAINTENANCE` and
+  `Rental Income` — don't map to an existing concept in this app (AMC
+  billing without contract terms; rental has no equivalent at all, this
+  being a computer sales/repair ERP). Both were still imported as plain
+  invoices, at the business owner's explicit choice, purely so April's
+  revenue total is complete — they're distinguishable by category
+  (`AMC`, `Rental`) if you want to exclude them from a sales-only view.
 
 ### Credit terms and due dates
 
