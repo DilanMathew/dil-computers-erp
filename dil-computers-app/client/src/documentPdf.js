@@ -1,6 +1,6 @@
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
-import { formatPrice } from './format'
+import { formatPriceAscii as formatPrice } from './format'
 
 // Builds and downloads a PDF for a quotation or an invoice — same layout,
 // different header fields and filename prefix. companyInfo/subtotal/
