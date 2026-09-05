@@ -1,7 +1,19 @@
 // Shared formatting helpers.
 
+// Rupees, with Indian digit grouping (1,23,456.78 — not 123,456.78).
 export function formatPrice(value) {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value)
+  return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(value)
+}
+
+// Same number, but "Rs." instead of the ₹ glyph. jsPDF's built-in fonts are
+// WinAnsi-encoded and have no U+20B9, so a ₹ in a PDF renders as a stray
+// box or drops out entirely — PDFs use this instead of formatPrice.
+export function formatPriceAscii(value) {
+  const amount = new Intl.NumberFormat('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value)
+  return `Rs. ${amount}`
 }
 
 // Standard Indian GST slabs. Kept in sync with the server's GST_RATES —
